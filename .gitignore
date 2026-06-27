@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.log
+.env
+.env.local
+.env.*.local
+
+# audit store
+*.sqlite
+*.sqlite-*
+*.db
+
+# foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/lib/
+
+.DS_Store
+.idea/
+.vscode/

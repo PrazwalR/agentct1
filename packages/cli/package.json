@@ -1,0 +1,19 @@
+{
+  "name": "@agentctl/cli",
+  "version": "0.1.0",
+  "description": "agentctl CLI — policy compile, dry-run checks, audit verification",
+  "type": "module",
+  "bin": {
+    "agentctl": "./dist/cli.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentctl/core": "workspace:*",
+    "commander": "^12.1.0",
+    "viem": "^2.53.1"
+  }
+}
