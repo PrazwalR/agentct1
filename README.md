@@ -50,8 +50,14 @@ multi-facilitator failover, the Isolation-Forest Phase-2 model (interface stubbe
 packages/core    @agentctl/core  — engine, adapters, x402, audit
 packages/cli     @agentctl/cli   — the agentctl command (incl. `eval` JSON bridge)
 packages/python  agentctl (PyPI) — thin Python bindings + LangChain middleware
+crates/          agentctl-engine — optional Rust hot-path sidecar (HTTP)
 contracts        Foundry project — AuditAnchor.sol
 ```
+
+The Rust sidecar offloads the hot path at native speed: `POST /score` (Isolation
+Forest) and `POST /inspect/{eip3009,permit2}` (EIP-712 digest + signer recovery). Its
+digests are cross-checked byte-for-byte against viem's `hashTypedData`. Build/test with
+`cargo test --manifest-path crates/agentctl-engine/Cargo.toml`.
 
 EVM (Base) + **Solana** are both supported as guarded x402 chains; the audit store is
 SQLite or **Postgres**. The Python bindings bridge to the TS engine via `agentctl eval`

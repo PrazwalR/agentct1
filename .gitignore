@@ -16,6 +16,14 @@ contracts/cache/
 contracts/broadcast/
 contracts/lib/
 
+# rust
+target/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
 .DS_Store
 .idea/
 .vscode/
