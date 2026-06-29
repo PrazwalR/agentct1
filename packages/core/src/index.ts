@@ -32,6 +32,9 @@ import {
   type WebhookEscalationOptions,
   createWebhookEscalation,
 } from "./escalation/webhook.js";
+import { decisionAttrs, paymentAttrs, withSpan } from "./tracing.js";
+import { type ClientSvmSigner, registerSvmScheme } from "./x402/svm.js";
+import { SOLANA_MAINNET_CAIP2 } from "./solana.js";
 
 export interface GuardConfig {
   /** Wallet adapter used for signing + execution. */
@@ -54,6 +57,8 @@ export interface GuardConfig {
   onEscalation?: (req: PaymentRequest, decision: PolicyDecision) => Promise<boolean>;
   /** HMAC-signed webhook for human approval on escalate (used if onEscalation unset). */
   escalationWebhook?: WebhookEscalationOptions;
+  /** Also accept Solana x402 payments: provide an SVM signer (and optional network). */
+  solana?: { signer: ClientSvmSigner; network?: string };
   /** Tuning for the behavioral Isolation Forest. */
   behavioral?: BehavioralOptions;
 }
@@ -82,6 +87,7 @@ export class AgentGuard {
   private readonly facilitatorFallbackUrls?: string[];
   private readonly rpcUrl?: string;
   private readonly onEscalation?: GuardConfig["onEscalation"];
+  private readonly solana?: GuardConfig["solana"];
   private spine?: Spine;
 
   private constructor(policy: Policy, config: GuardConfig) {
@@ -97,6 +103,7 @@ export class AgentGuard {
     this.onEscalation =
       config.onEscalation ??
       (config.escalationWebhook ? createWebhookEscalation(config.escalationWebhook) : undefined);
+    this.solana = config.solana;
   }
 
   /** Async factory — compiles NL policy if needed. */
@@ -123,26 +130,36 @@ export class AgentGuard {
    * Returns a decision; call execute() (or use guardedFetch) to proceed.
    */
   async evaluate(req: PaymentRequest): Promise<PolicyDecision> {
-    const { checks: policyChecks, escalate: policyEscalate } = await this.evaluator.evaluate(req);
-    const { score, anomalyChecks } = await this.behavioral.score(req);
-    const intentCheck = await this.intent.check(req);
-    const checks: PolicyCheck[] = [...policyChecks, ...anomalyChecks, intentCheck];
+    return withSpan("agentctl.evaluate", paymentAttrs(req), async (span) => {
+      const { checks: policyChecks, escalate: policyEscalate } =
+        await this.evaluator.evaluate(req);
+      const { score, anomalyChecks } = await this.behavioral.score(req);
+      const intentCheck = await this.intent.check(req);
+      const checks: PolicyCheck[] = [...policyChecks, ...anomalyChecks, intentCheck];
 
-    const hasCriticalBlock = checks.some((c) => !c.passed && c.severity === "critical");
-    const anomalyOver = score >= this.evaluator.anomalyThreshold;
-    const needsEscalation =
-      policyEscalate || (anomalyOver && this.evaluator.anomalyAction === "escalate");
+      const hasCriticalBlock = checks.some((c) => !c.passed && c.severity === "critical");
+      const anomalyOver = score >= this.evaluator.anomalyThreshold;
+      const needsEscalation =
+        policyEscalate || (anomalyOver && this.evaluator.anomalyAction === "escalate");
 
-    let verdict: Verdict;
-    if (hasCriticalBlock || (anomalyOver && this.evaluator.anomalyAction === "block")) {
-      verdict = "block";
-    } else if (needsEscalation) {
-      verdict = "escalate";
-    } else {
-      verdict = "allow";
-    }
+      let verdict: Verdict;
+      if (hasCriticalBlock || (anomalyOver && this.evaluator.anomalyAction === "block")) {
+        verdict = "block";
+      } else if (needsEscalation) {
+        verdict = "escalate";
+      } else {
+        verdict = "allow";
+      }
 
-    return { verdict, riskScore: score, checks, reason: buildReason(verdict, checks, score) };
+      const decision: PolicyDecision = {
+        verdict,
+        riskScore: score,
+        checks,
+        reason: buildReason(verdict, checks, score),
+      };
+      span.setAttributes(decisionAttrs(decision));
+      return decision;
+    });
   }
 
   /**
@@ -150,35 +167,42 @@ export class AgentGuard {
    * facilitator (no HTTP 402 required). Records to the audit log regardless.
    */
   async execute(req: PaymentRequest): Promise<ExecuteResult> {
-    const { decision, allowed } = await this.runGuard(req);
-    if (!allowed) {
-      await this.audit.record(req, decision);
-      return {
-        executed: false,
-        decision,
-        reason: decision.verdict === "block" ? "blocked by policy" : "escalation denied/timed out",
+    return withSpan("agentctl.execute", paymentAttrs(req), async (span) => {
+      const { decision, allowed } = await this.runGuard(req);
+      span.setAttributes(decisionAttrs(decision));
+      if (!allowed) {
+        await this.audit.record(req, decision);
+        span.setAttribute("agentctl.executed", false);
+        return {
+          executed: false,
+          decision,
+          reason:
+            decision.verdict === "block" ? "blocked by policy" : "escalation denied/timed out",
+        };
+      }
+
+      const { plainClient, facilitator } = await this.ensureSpine();
+      const paymentRequired = this.toPaymentRequired(req);
+      const requirements = paymentRequired.accepts[0];
+      if (!requirements) throw new Error("internal: no payment requirements built");
+
+      const payload = await plainClient.createPaymentPayload(paymentRequired);
+      const settleResp = await facilitator.settle(payload, requirements);
+      const settlement: Settlement = {
+        txHash: settleResp.transaction as Hex,
+        success: settleResp.success,
+        facilitator: this.facilitatorUrl,
       };
-    }
 
-    const { plainClient, facilitator } = await this.ensureSpine();
-    const paymentRequired = this.toPaymentRequired(req);
-    const requirements = paymentRequired.accepts[0];
-    if (!requirements) throw new Error("internal: no payment requirements built");
-
-    const payload = await plainClient.createPaymentPayload(paymentRequired);
-    const settleResp = await facilitator.settle(payload, requirements);
-    const settlement: Settlement = {
-      txHash: settleResp.transaction as Hex,
-      success: settleResp.success,
-      facilitator: this.facilitatorUrl,
-    };
-
-    if (settlement.success) {
-      await this.behavioral.observe(req);
-      this.evaluator.observe(req);
-    }
-    await this.audit.record(req, decision, settlement);
-    return { executed: settlement.success, decision, settlement, reason: settleResp.errorReason };
+      if (settlement.success) {
+        await this.behavioral.observe(req);
+        this.evaluator.observe(req);
+      }
+      await this.audit.record(req, decision, settlement);
+      span.setAttribute("agentctl.executed", settlement.success);
+      span.setAttribute("agentctl.tx_hash", settlement.txHash);
+      return { executed: settlement.success, decision, settlement, reason: settleResp.errorReason };
+    });
   }
 
   /**
@@ -278,6 +302,12 @@ export class AgentGuard {
 
     const plainClient = new x402Client().register(network, new ExactEvmScheme(signer));
 
+    if (this.solana) {
+      const svmNetwork = this.solana.network ?? SOLANA_MAINNET_CAIP2;
+      registerSvmScheme(guardedClient, this.solana.signer, svmNetwork);
+      registerSvmScheme(plainClient, this.solana.signer, svmNetwork);
+    }
+
     this.spine = { guardedClient, plainClient, facilitator };
     return this.spine;
   }
@@ -320,7 +350,12 @@ export async function createGuard(config: GuardConfig): Promise<AgentGuard> {
 // ─── Re-exports for SDK + CLI consumers ──────────────────────────────────────
 export { ViemAdapter } from "./adapters/viem.js";
 export { CdpAdapter } from "./adapters/cdp.js";
-export { compilePolicy } from "./policy/compiler.js";
+export { CircleAdapter } from "./adapters/circle.js";
+export { PrivyAdapter } from "./adapters/privy.js";
+export { createRemoteSignerAccount, eip712ToJson } from "./adapters/remote-signer.js";
+export type { CircleAdapterConfig } from "./adapters/circle.js";
+export type { PrivyAdapterConfig } from "./adapters/privy.js";
+export { compilePolicy, compilePolicyObject } from "./policy/compiler.js";
 export { PolicyEvaluator } from "./policy/evaluator.js";
 export { BehavioralScorer } from "./behavioral/isolation.js";
 export type { BehavioralOptions, BehavioralResult } from "./behavioral/isolation.js";
@@ -338,6 +373,9 @@ export {
 export type { WebhookEscalationOptions, EscalationEvent } from "./escalation/webhook.js";
 export { AuditLogger, hashEntry } from "./audit/logger.js";
 export type { AnchorConfig, FlushResult, EntryProof } from "./audit/logger.js";
+export { SqliteAuditStore } from "./audit/store.js";
+export type { AuditStore, StoredEntry } from "./audit/store.js";
+export { PostgresAuditStore } from "./audit/postgres-store.js";
 export { MerkleAuditBatch, entryToLeaf } from "./audit/merkle.js";
 export { AuditAnchorClient, AUDIT_ANCHOR_ABI } from "./audit/anchor.js";
 export {
@@ -352,6 +390,21 @@ export {
   buildPermit2Approval,
 } from "./x402/permit2.js";
 export { FailoverFacilitatorClient } from "./x402/facilitator.js";
+export { registerSvmScheme } from "./x402/svm.js";
+export type { ClientSvmSigner } from "./x402/svm.js";
+export {
+  SOLANA_MAINNET_CAIP2,
+  SOLANA_DEVNET_CAIP2,
+  SOLANA_TESTNET_CAIP2,
+  SOLANA_USDC_MAINNET,
+  SOLANA_USDC_DEVNET,
+  SOLANA_NETWORKS,
+  isSolanaNetwork,
+  getSolanaUsdc,
+  validateSvmAddress,
+} from "./solana.js";
+export { getTracer, withSpan, paymentAttrs, decisionAttrs } from "./tracing.js";
+export type { SpanAttrs } from "./tracing.js";
 export {
   CHAINS,
   DEFAULT_TESTNET_FACILITATOR,

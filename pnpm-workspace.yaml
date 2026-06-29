@@ -3,3 +3,5 @@ packages:
 allowBuilds:
   esbuild: true
   better-sqlite3: true
+  bufferutil: false
+  utf-8-validate: false

@@ -28,7 +28,9 @@ describe("isolation forest", () => {
 
 describe("behavioral scorer — Isolation Forest phase 2", () => {
   it("flags a multivariate anomaly once the forest is trained", async () => {
-    // Fake timers make the interval/hour features deterministic (no CI flakes).
+    // Pin the clock (deterministic hour/interval; no CI flakes). Time is held
+    // constant across observations, so the interval feature has no spurious
+    // spread — matching steady operation rather than a tight test loop.
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T12:00:00Z"));
     try {
@@ -36,16 +38,14 @@ describe("behavioral scorer — Isolation Forest phase 2", () => {
         forestMinObservations: 64,
         forestRetrainInterval: 10000,
         forestSampleSize: 64,
-        forestTrees: 120,
+        forestTrees: 150,
         forestSeed: 7,
       });
-      // Varied baseline of legitimate small payments to known APIs, 1s apart.
+      // Varied baseline of legitimate small payments to known APIs.
       for (let i = 0; i < 90; i++) {
-        vi.advanceTimersByTime(1000);
         const amt = parseUnits((0.05 + (i % 20) * 0.03).toFixed(6), 6);
         await scorer.observe(req(amt, known(i % 4)));
       }
-      vi.advanceTimersByTime(1000);
       // A payment wildly out of distribution on amount + counterparty.
       const out = await scorer.score(req(parseUnits("100000", 6), FRESH));
       expect(out.anomalyChecks.some((c) => c.id === "behavioral-multivariate-anomaly")).toBe(true);

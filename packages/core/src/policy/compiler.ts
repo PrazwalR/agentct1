@@ -65,20 +65,26 @@ export async function compilePolicy(
   const text = data.content?.find((b) => b.type === "text")?.text ?? "";
   const json = extractJson(text);
 
-  const parsed = compilerOutputSchema.safeParse(json);
-  if (!parsed.success) {
-    throw new Error(
-      `Policy compiler produced invalid JSON: ${parsed.error.message}\nRaw: ${text.slice(0, 500)}`,
-    );
-  }
+  return compilePolicyObject(json, agentId, naturalLanguage);
+}
 
+/**
+ * Build a Policy from an already-structured object (the compiler-output shape,
+ * USD amounts) without calling an LLM. Validates with zod and converts USD →
+ * token units. Used by the CLI `eval` command and the Python bridge.
+ */
+export function compilePolicyObject(input: unknown, agentId: string, sourceText?: string): Policy {
+  const parsed = compilerOutputSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new Error(`Invalid policy: ${parsed.error.message}`);
+  }
   const usdc = getChain("eip155:84532").usdc; // default policy chain: Base Sepolia
   return {
     agentId,
     rules: parsed.data.rules.map((r) => toPolicyRule(r, usdc)),
     anomalyThreshold: parsed.data.anomalyThreshold,
     anomalyAction: parsed.data.anomalyAction,
-    sourceText: naturalLanguage,
+    sourceText,
   };
 }
 

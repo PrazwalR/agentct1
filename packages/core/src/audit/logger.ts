@@ -1,9 +1,10 @@
-import Database from "better-sqlite3";
 import { keccak256, toHex, type Address, type Hex } from "viem";
 import { randomUUID } from "node:crypto";
 import type { AuditEntry, PaymentRequest, PolicyDecision, Settlement } from "../types.js";
 import { MerkleAuditBatch } from "./merkle.js";
 import { AuditAnchorClient } from "./anchor.js";
+import { type AuditStore, SqliteAuditStore } from "./store.js";
+import { PostgresAuditStore } from "./postgres-store.js";
 
 export interface AnchorConfig {
   chain: string;
@@ -30,32 +31,6 @@ export function hashEntry(req: PaymentRequest, decision: PolicyDecision): Hex {
   return keccak256(toHex(canonical));
 }
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS audit_entries (
-  id            TEXT PRIMARY KEY,
-  timestamp     INTEGER NOT NULL,
-  agent_id      TEXT NOT NULL,
-  request_json  TEXT NOT NULL,
-  decision_json TEXT NOT NULL,
-  settlement_json TEXT,
-  entry_hash    TEXT NOT NULL,
-  batch_index   INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_entries(agent_id);
-CREATE INDEX IF NOT EXISTS idx_audit_batch ON audit_entries(batch_index);
-`;
-
-interface Row {
-  id: string;
-  timestamp: number;
-  agent_id: string;
-  request_json: string;
-  decision_json: string;
-  settlement_json: string | null;
-  entry_hash: string;
-  batch_index: number | null;
-}
-
 export interface FlushResult {
   batchIndex: number;
   root: Hex;
@@ -70,20 +45,22 @@ export interface EntryProof {
   localRoot: Hex;
 }
 
+function makeStore(store: string): AuditStore {
+  if (store.startsWith("postgres")) return new PostgresAuditStore(store);
+  const path = store === "sqlite" ? process.env.AUDIT_DB_PATH ?? "./agentctl.sqlite" : store;
+  return new SqliteAuditStore(path);
+}
+
 /**
- * Records every policy decision to SQLite (allowed, blocked, or escalated),
- * batches unanchored entries into a Merkle tree, and commits roots on-chain.
+ * Records every policy decision (allowed, blocked, or escalated) to a pluggable
+ * store, batches unanchored entries into a Merkle tree, and commits roots on-chain.
  */
 export class AuditLogger {
-  private _db?: Database.Database;
-  private readonly path: string;
+  private readonly store: AuditStore;
   private readonly anchorClient?: AuditAnchorClient;
 
-  constructor(store = "sqlite", anchor?: AnchorConfig) {
-    if (store.startsWith("postgres")) {
-      throw new Error("Postgres audit store not yet supported (Phase: server). Use sqlite.");
-    }
-    this.path = store === "sqlite" ? process.env.AUDIT_DB_PATH ?? "./agentctl.sqlite" : store;
+  constructor(store: string | AuditStore = "sqlite", anchor?: AnchorConfig) {
+    this.store = typeof store === "string" ? makeStore(store) : store;
     if (anchor?.committerKey) {
       this.anchorClient = new AuditAnchorClient({
         chain: anchor.chain,
@@ -92,16 +69,6 @@ export class AuditLogger {
         rpcUrl: anchor.rpcUrl,
       });
     }
-  }
-
-  /** Lazily open the DB so evaluate-only callers never create a file. */
-  private db(): Database.Database {
-    if (!this._db) {
-      this._db = new Database(this.path);
-      this._db.pragma("journal_mode = WAL");
-      this._db.exec(SCHEMA);
-    }
-    return this._db;
   }
 
   async record(
@@ -118,86 +85,56 @@ export class AuditLogger {
       settlement,
       entryHash: hashEntry(req, decision),
     };
-    this.db()
-      .prepare(
-        `INSERT INTO audit_entries
-         (id, timestamp, agent_id, request_json, decision_json, settlement_json, entry_hash, batch_index)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
-      )
-      .run(
-        entry.id,
-        entry.timestamp,
-        entry.agentId,
-        serializeRequest(req),
-        JSON.stringify(decision),
-        settlement ? JSON.stringify(settlement) : null,
-        entry.entryHash,
-      );
+    await this.store.insert(entry);
     return entry;
   }
 
-  list(opts: { agentId?: string } = {}): AuditEntry[] {
-    const db = this.db();
-    const rows = (
-      opts.agentId
-        ? db
-            .prepare("SELECT * FROM audit_entries WHERE agent_id = ? ORDER BY rowid")
-            .all(opts.agentId)
-        : db.prepare("SELECT * FROM audit_entries ORDER BY rowid").all()
-    ) as Row[];
-    return rows.map(rowToEntry);
+  list(opts: { agentId?: string } = {}): Promise<AuditEntry[]> {
+    return this.store.list(opts.agentId);
   }
 
-  getById(id: string): (AuditEntry & { batchIndex: number | null }) | undefined {
-    const row = this.db().prepare("SELECT * FROM audit_entries WHERE id = ?").get(id) as
-      | Row
-      | undefined;
-    if (!row) return undefined;
-    return { ...rowToEntry(row), batchIndex: row.batch_index };
+  async getById(id: string): Promise<(AuditEntry & { batchIndex: number | null }) | undefined> {
+    const stored = await this.store.getById(id);
+    return stored ? { ...stored.entry, batchIndex: stored.batchIndex } : undefined;
   }
 
   /**
    * Batch all not-yet-anchored entries into a Merkle tree and commit the root
-   * on-chain. No-op (returns undefined) if anchoring isn't configured or there
-   * is nothing to anchor.
+   * on-chain. No-op (undefined) if anchoring isn't configured or nothing pending.
    */
   async flush(): Promise<FlushResult | undefined> {
     if (!this.anchorClient) return undefined;
-    const db = this.db();
-    const rows = db
-      .prepare("SELECT * FROM audit_entries WHERE batch_index IS NULL ORDER BY rowid")
-      .all() as Row[];
+    const rows = await this.store.unbatched();
     if (rows.length === 0) return undefined;
 
     const batch = new MerkleAuditBatch();
-    for (const r of rows) batch.addEntry(rowToEntry(r));
+    for (const entry of rows) batch.addEntry(entry);
     const root = batch.root();
     const txHash = await this.anchorClient.commit(root, rows.length);
 
     const operator = this.anchorClient.operatorAddress();
     const idx = (await this.anchorClient.getBatchCount(operator)) - 1;
-    const mark = db.prepare("UPDATE audit_entries SET batch_index = ? WHERE id = ?");
-    const tx = db.transaction((ids: string[]) => {
-      for (const id of ids) mark.run(idx, id);
-    });
-    tx(rows.map((r) => r.id));
+    await this.store.markBatched(
+      rows.map((r) => r.id),
+      idx,
+    );
     return { batchIndex: idx, root, txHash, entryCount: rows.length };
   }
 
   /** Rebuild a committed batch and produce a proof for a single entry. */
-  proofFor(entryId: string): EntryProof | undefined {
-    const target = this.getById(entryId);
+  async proofFor(entryId: string): Promise<EntryProof | undefined> {
+    const target = await this.getById(entryId);
     if (!target || target.batchIndex === null) return undefined;
-    const rows = this.db()
-      .prepare("SELECT * FROM audit_entries WHERE batch_index = ? ORDER BY rowid")
-      .all(target.batchIndex) as Row[];
+    const rows = await this.store.entriesInBatch(target.batchIndex);
+
     const batch = new MerkleAuditBatch();
     let position = -1;
-    rows.forEach((r, i) => {
-      batch.addEntry(rowToEntry(r));
-      if (r.id === entryId) position = i;
+    rows.forEach((entry, i) => {
+      batch.addEntry(entry);
+      if (entry.id === entryId) position = i;
     });
     if (position < 0) return undefined;
+
     return {
       batchIndex: target.batchIndex,
       leaf: batch.leafAt(position),
@@ -206,31 +143,7 @@ export class AuditLogger {
     };
   }
 
-  close(): void {
-    this._db?.close();
-    this._db = undefined;
+  close(): Promise<void> {
+    return this.store.close();
   }
-}
-
-function serializeRequest(r: PaymentRequest): string {
-  return JSON.stringify({ ...r, amount: r.amount.toString() });
-}
-
-function deserializeRequest(s: string): PaymentRequest {
-  const o = JSON.parse(s) as Omit<PaymentRequest, "amount"> & { amount: string };
-  return { ...o, amount: BigInt(o.amount) };
-}
-
-function rowToEntry(row: Row): AuditEntry {
-  return {
-    id: row.id,
-    timestamp: row.timestamp,
-    agentId: row.agent_id,
-    request: deserializeRequest(row.request_json),
-    decision: JSON.parse(row.decision_json) as PolicyDecision,
-    settlement: row.settlement_json
-      ? (JSON.parse(row.settlement_json) as Settlement)
-      : undefined,
-    entryHash: row.entry_hash as Hex,
-  };
 }

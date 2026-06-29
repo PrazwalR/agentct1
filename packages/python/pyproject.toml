@@ -1,0 +1,17 @@
+[project]
+name = "agentctl"
+version = "0.1.0"
+description = "Python bindings for agentctl — policy & observability for autonomous AI agent payments"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentctl"]

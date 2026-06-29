@@ -34,15 +34,35 @@
   },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.51.2",
+    "@opentelemetry/api": "^1.9.1",
     "@openzeppelin/merkle-tree": "^1.0.8",
     "@x402/core": "^2.16.0",
     "@x402/evm": "^2.16.0",
     "@x402/fetch": "^2.16.0",
+    "@x402/svm": "^2.17.0",
     "better-sqlite3": "^12.11.1",
+    "pg": "^8.22.0",
     "viem": "^2.53.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13"
+    "@circle-fin/developer-controlled-wallets": "^10.7.1",
+    "@opentelemetry/sdk-trace-base": "^2.8.0",
+    "@privy-io/server-auth": "^1.32.5",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/pg": "^8.20.0",
+    "pg-mem": "^3.0.14"
+  },
+  "peerDependencies": {
+    "@circle-fin/developer-controlled-wallets": "^10.7.1",
+    "@privy-io/server-auth": "^1.32.5"
+  },
+  "peerDependenciesMeta": {
+    "@circle-fin/developer-controlled-wallets": {
+      "optional": true
+    },
+    "@privy-io/server-auth": {
+      "optional": true
+    }
   }
 }

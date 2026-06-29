@@ -10,6 +10,7 @@ import {
   type PolicyDecision,
   ViemAdapter,
   compilePolicy,
+  compilePolicyObject,
   createGuard,
   getChain,
   policyFromJSON,
@@ -91,10 +92,10 @@ program
   .option("--verify", "verify each anchored entry against AuditAnchor.sol")
   .action(async (opts) => {
     const log = new AuditLogger(opts.db);
-    const entries = log.list({ agentId: opts.agent });
+    const entries = await log.list({ agentId: opts.agent });
     if (entries.length === 0) {
       console.log("no audit entries");
-      log.close();
+      await log.close();
       return;
     }
     for (const e of entries) {
@@ -109,7 +110,7 @@ program
       );
     }
     if (opts.verify) await verifyEntries(log, opts.chain, opts.agent);
-    log.close();
+    await log.close();
   });
 
 // ─── watch ───────────────────────────────────────────────────────────────────
@@ -122,8 +123,8 @@ program
     const log = new AuditLogger(opts.db);
     const seen = new Set<string>();
     console.log(`watching ${opts.agent ?? "all agents"}… (ctrl-C to stop)`);
-    setInterval(() => {
-      for (const e of log.list({ agentId: opts.agent })) {
+    setInterval(async () => {
+      for (const e of await log.list({ agentId: opts.agent })) {
         if (seen.has(e.id)) continue;
         seen.add(e.id);
         console.log(
@@ -181,12 +182,58 @@ program
     process.exitCode = 0;
   });
 
+// ─── eval (machine bridge: JSON in → JSON out) ───────────────────────────────
+program
+  .command("eval")
+  .description("Evaluate a JSON {policy, request} from stdin; write the decision as JSON")
+  .action(async () => {
+    const { policy: policyInput, request } = JSON.parse(await readStdin());
+    const agentId: string = request.agentId ?? "bridge-agent";
+    const policy = compilePolicyObject(policyInput, agentId);
+    const guard = await createGuard({
+      wallet: new ViemAdapter({ privateKey: generatePrivateKey(), chain: request.chain }),
+      policy,
+      llmApiKey: request.llm ? process.env.ANTHROPIC_API_KEY : undefined,
+    });
+    const req: PaymentRequest = {
+      intent: request.intent ?? "",
+      amount: BigInt(request.amount),
+      token: request.token as Address,
+      recipient: request.recipient as Address,
+      chain: request.chain ?? DEFAULT_CHAIN,
+      agentId,
+      resourceUrl: request.resourceUrl,
+    };
+    const decision = await guard.evaluate(req);
+    process.stdout.write(
+      `${JSON.stringify({
+        verdict: decision.verdict,
+        riskScore: decision.riskScore,
+        reason: decision.reason,
+        checks: decision.checks,
+      })}\n`,
+    );
+  });
+
 program.parseAsync().catch((err) => {
   console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
   process.exitCode = 1;
 });
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+function readStdin(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin
+      .on("data", (chunk) => {
+        data += chunk;
+      })
+      .on("end", () => resolve(data))
+      .on("error", reject);
+  });
+}
+
 function mkReq(amountUsd: string, recipient: Address, intent: string): PaymentRequest {
   return {
     intent,
@@ -258,8 +305,8 @@ async function verifyEntries(
   });
   const operator = anchor.operatorAddress();
   console.log("\nverification:");
-  for (const e of log.list({ agentId: agent })) {
-    const proof = log.proofFor(e.id);
+  for (const e of await log.list({ agentId: agent })) {
+    const proof = await log.proofFor(e.id);
     if (!proof) {
       console.log(`  ${e.id.slice(0, 8)}  not anchored yet`);
       continue;

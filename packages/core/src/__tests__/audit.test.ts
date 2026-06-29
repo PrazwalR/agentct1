@@ -61,13 +61,13 @@ describe("audit logger (sqlite :memory:)", () => {
     await log.record(mkReq(0), okDecision);
     await log.record(mkReq(1), { ...okDecision, verdict: "block", reason: "nope" });
 
-    const all = log.list();
+    const all = await log.list();
     expect(all.length).toBe(2);
     expect(all[0]?.request.amount).toBe(parseUnits("0.10", 6));
     expect(all[1]?.decision.verdict).toBe("block");
 
-    const byAgent = log.list({ agentId: "a" });
+    const byAgent = await log.list({ agentId: "a" });
     expect(byAgent.length).toBe(2);
-    log.close();
+    await log.close();
   });
 });

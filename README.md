@@ -26,11 +26,19 @@ This repo is the runnable spine from the build plan, targeting **Base Sepolia** 
 - Natural-language → policy compiler (Claude Haiku, zod-validated output).
 - x402 integration via the official `@x402/fetch` + `@x402/evm`: the guard injects at
   `onBeforePaymentCreation` (block before signing) and records at `onPaymentResponse`.
-- Wallet adapters: `viem` (local key) and `cdp` (CDP server wallet).
-- EIP-3009 signing + authorization inspection (recipient/amount-bound, random nonce).
+- Wallet adapters: `viem` (local key), `cdp` (CDP server wallet), `circle` + `privy`
+  (MPC, via a viem remote-signer bridge).
+- EIP-3009 signing (USDC) + **Permit2** witness path for any ERC-20 incl. USDT, with
+  authorization inspection (recipient/amount-bound, random nonce).
+- Behavioral: EWMA baselines + a real **Isolation Forest** for multivariate anomalies.
+- **HMAC-signed escalation webhook** for human approval; **multi-facilitator failover**
+  for the settle path; **OpenTelemetry** spans over evaluate/execute.
 - Audit log in SQLite, Merkle-batched with `@openzeppelin/merkle-tree`, root committed
   on-chain via `AuditAnchor.sol`. Sorted-pair hashing matches the contract exactly.
 - CLI: `check`, `policy create`, `audit --verify`, `watch`, `demo`.
+
+The `circle` and `privy` adapters are optional peer deps — install the provider's SDK
+(`@circle-fin/developer-controlled-wallets` / `@privy-io/server-auth`) to use them.
 
 **Deferred** (documented, not yet built): Rust sidecar, Python/PyPI bindings,
 Circle/Privy/Crossmint adapters, Permit2/USDT path, Solana, Postgres, OpenTelemetry,
@@ -39,10 +47,15 @@ multi-facilitator failover, the Isolation-Forest Phase-2 model (interface stubbe
 ## Layout
 
 ```
-packages/core   @agentctl/core  — engine, adapters, x402, audit
-packages/cli    @agentctl/cli   — the agentctl command
-contracts       Foundry project — AuditAnchor.sol
+packages/core    @agentctl/core  — engine, adapters, x402, audit
+packages/cli     @agentctl/cli   — the agentctl command (incl. `eval` JSON bridge)
+packages/python  agentctl (PyPI) — thin Python bindings + LangChain middleware
+contracts        Foundry project — AuditAnchor.sol
 ```
+
+EVM (Base) + **Solana** are both supported as guarded x402 chains; the audit store is
+SQLite or **Postgres**. The Python bindings bridge to the TS engine via `agentctl eval`
+(one decision engine, no duplicated logic).
 
 ## Install & build
 
