@@ -51,6 +51,19 @@ async fn score_flags_an_outlier() {
 }
 
 #[tokio::test]
+async fn score_with_mismatched_point_length_does_not_crash() {
+    // A point shorter than the training vectors must return 200, not panic (DoS).
+    let body = json!({
+        "vectors": [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+        "point": [1.0],
+        "trees": 10, "sample_size": 2, "seed": 1
+    });
+    let (status, value) = call("POST", "/score", Some(body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(value["score"].is_number());
+}
+
+#[tokio::test]
 async fn inspect_eip3009_recovers_the_signer() {
     let body = json!({
         "domain": {"name":"USDC","version":"2","chain_id":84532,"verifying_contract":"0x036CbD53842c5426634e7929541eC2318f3dCF7e"},

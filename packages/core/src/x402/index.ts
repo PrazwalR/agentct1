@@ -5,6 +5,7 @@ export {
   signEIP3009Authorization,
   inspectAuthorization,
   randomNonce,
+  InFlightNonceTracker,
   TRANSFER_WITH_AUTHORIZATION_TYPES,
 } from "./eip3009.js";
 export type { SignAuthorizationOptions, InspectedAuthorization } from "./eip3009.js";

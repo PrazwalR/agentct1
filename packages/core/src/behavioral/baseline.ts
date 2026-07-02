@@ -20,7 +20,8 @@ export class EWMABaseline {
   zScore(feature: string, value: number): number {
     const mean = this.means.get(feature);
     const variance = this.variances.get(feature);
-    if (mean === undefined || variance === undefined || variance <= 0) return 0;
+    // `!(variance > 0)` also rejects NaN (a poisoned variance) and negatives, not just 0.
+    if (mean === undefined || variance === undefined || !(variance > 0)) return 0;
     return (value - mean) / Math.sqrt(variance);
   }
 

@@ -89,11 +89,23 @@ export class PostgresAuditStore implements AuditStore {
 
   async markBatched(ids: string[], batchIndex: number): Promise<void> {
     await this.init();
-    for (const id of ids) {
-      await this.pool.query("UPDATE audit_entries SET batch_index = $1 WHERE id = $2", [
-        batchIndex,
-        id,
-      ]);
+    // Atomic: a crash mid-loop after the on-chain commit must not leave a split
+    // batch (some rows tagged, some NULL) that can never be proven again.
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const id of ids) {
+        await client.query("UPDATE audit_entries SET batch_index = $1 WHERE id = $2", [
+          batchIndex,
+          id,
+        ]);
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
     }
   }
 

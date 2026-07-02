@@ -8,7 +8,7 @@ import type {
 import { signEIP3009Authorization } from "../x402/eip3009.js";
 import { signPermit2Authorization } from "../x402/permit2.js";
 import { erc20Balance, makePublicClient } from "./base.js";
-import { createRemoteSignerAccount } from "./remote-signer.js";
+import { createRemoteSignerAccount, eip712ToJson } from "./remote-signer.js";
 
 export interface PrivyAdapterConfig {
   /** PRIVY_APP_ID — falls back to env. */
@@ -49,8 +49,10 @@ export class PrivyAdapter implements IWalletAdapter {
     this.signer = createRemoteSignerAccount(this.cfg.address, async (params) => {
       const res = await privy.walletApi.ethereum.signTypedData({
         walletId: this.cfg.walletId,
-        // Privy accepts a viem-shaped EIP-712 typed-data object.
-        typedData: params as never,
+        // Serialize bigints (message value/validAfter/validBefore, Permit2 amount/
+        // nonce/deadline) to strings — Privy's SDK JSON-serializes the payload and
+        // would otherwise throw "Do not know how to serialize a BigInt".
+        typedData: JSON.parse(eip712ToJson(params)) as never,
       });
       return res.signature as Hex;
     });

@@ -1,4 +1,4 @@
-import type { Address, LocalAccount } from "viem";
+import type { Address, Hex, LocalAccount } from "viem";
 import { toAccount } from "viem/accounts";
 import type {
   IWalletAdapter,
@@ -6,7 +6,7 @@ import type {
   SignedAuthorization,
   SignedPermit2Authorization,
 } from "../types.js";
-import { signEIP3009Authorization } from "../x402/eip3009.js";
+import { InFlightNonceTracker, signEIP3009Authorization } from "../x402/eip3009.js";
 import { signPermit2Authorization } from "../x402/permit2.js";
 import { erc20Balance, makePublicClient } from "./base.js";
 
@@ -37,6 +37,7 @@ export class CdpAdapter implements IWalletAdapter {
   readonly chain: string;
   private readonly cfg: CdpAdapterConfig;
   private signer?: LocalAccount;
+  private readonly nonces = new InFlightNonceTracker();
 
   constructor(cfg: CdpAdapterConfig = {}) {
     this.cfg = cfg;
@@ -81,10 +82,15 @@ export class CdpAdapter implements IWalletAdapter {
   }
 
   async authorizePayment(req: PaymentRequest): Promise<SignedAuthorization> {
-    return signEIP3009Authorization(req, await this.ensureSigner());
+    return signEIP3009Authorization(req, await this.ensureSigner(), { tracker: this.nonces });
   }
 
   async authorizePaymentPermit2(req: PaymentRequest): Promise<SignedPermit2Authorization> {
     return signPermit2Authorization(req, await this.ensureSigner());
+  }
+
+  /** Release an EIP-3009 nonce once its authorization has settled or expired. */
+  releaseNonce(nonce: Hex): void {
+    this.nonces.release(nonce);
   }
 }

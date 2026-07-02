@@ -3,6 +3,7 @@
 
 use alloy_primitives::U256;
 use axum::{
+    extract::DefaultBodyLimit,
     http::StatusCode,
     routing::{get, post},
     Json, Router,
@@ -18,6 +19,8 @@ pub fn app() -> Router {
         .route("/score", post(score))
         .route("/inspect/eip3009", post(inspect_eip3009))
         .route("/inspect/permit2", post(inspect_permit2))
+        // Cap request bodies (defense against a /score vector flood).
+        .layer(DefaultBodyLimit::max(1024 * 1024))
 }
 
 async fn health() -> &'static str {

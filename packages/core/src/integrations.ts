@@ -1,7 +1,7 @@
-import { type Address, parseUnits } from "viem";
+import type { Address } from "viem";
 import type { AgentGuard, ExecuteResult } from "./index.js";
 import type { PaymentRequest, PolicyDecision } from "./types.js";
-import { getChain } from "./constants.js";
+import { getChain, usdToTokenUnits } from "./constants.js";
 
 export interface PaymentToolInput {
   /** Natural-language reason for this payment (the declared intent). */
@@ -23,7 +23,7 @@ export function toPaymentRequest(input: PaymentToolInput, agentId: string): Paym
   const token =
     !input.token || input.token.toUpperCase() === "USDC" ? cfg.usdc : (input.token as Address);
   const amount =
-    typeof input.amount === "bigint" ? input.amount : parseUnits(String(input.amount), 6);
+    typeof input.amount === "bigint" ? input.amount : usdToTokenUnits(input.amount);
   return {
     intent: input.intent ?? input.reason ?? "tool payment",
     amount,

@@ -59,7 +59,7 @@ fn build_tree(data: &[Vec<f64>], depth: usize, max_depth: usize, rng: &mut Mulbe
         let mut min = f64::INFINITY;
         let mut max = f64::NEG_INFINITY;
         for row in data {
-            let x = row[f];
+            let x = row.get(f).copied().unwrap_or(0.0); // ragged rows must not panic
             if x < min {
                 min = x;
             }
@@ -82,7 +82,7 @@ fn build_tree(data: &[Vec<f64>], depth: usize, max_depth: usize, rng: &mut Mulbe
     let mut left = Vec::new();
     let mut right = Vec::new();
     for row in data {
-        if row[f] < v {
+        if row.get(f).copied().unwrap_or(0.0) < v {
             left.push(row.clone());
         } else {
             right.push(row.clone());
@@ -101,7 +101,10 @@ fn path_length(x: &[f64], node: &Node, depth: usize) -> f64 {
     match node {
         Node::Leaf { size } => depth as f64 + c_factor(*size),
         Node::Internal { f, v, left, right } => {
-            let next = if x[*f] < *v { left } else { right };
+            // A query point shorter than the training dims must not panic (remote DoS
+            // via the /score API) — treat a missing feature as 0, matching the TS scorer.
+            let xf = x.get(*f).copied().unwrap_or(0.0);
+            let next = if xf < *v { left } else { right };
             path_length(x, next, depth + 1)
         }
     }
@@ -174,5 +177,18 @@ mod tests {
         let a = IsolationForest::fit(&cluster(), 64, 64, 7).anomaly_score(&[1e10, 5.0, 3.0, 1.0]);
         let b = IsolationForest::fit(&cluster(), 64, 64, 7).anomaly_score(&[1e10, 5.0, 3.0, 1.0]);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn short_or_ragged_vectors_do_not_panic() {
+        // A query point shorter than the training dims must not panic (remote DoS).
+        let forest = IsolationForest::fit(&cluster(), 50, 64, 1);
+        let _ = forest.anomaly_score(&[1.0]);
+        let _ = forest.anomaly_score(&[]);
+        let _ = forest.anomaly_score(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        // Ragged training data (rows of differing lengths) must not panic either.
+        let ragged = vec![vec![1.0, 2.0, 3.0], vec![1.0], vec![]];
+        let f2 = IsolationForest::fit(&ragged, 10, 8, 2);
+        let _ = f2.anomaly_score(&[1.0, 2.0, 3.0]);
     }
 }

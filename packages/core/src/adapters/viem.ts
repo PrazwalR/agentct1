@@ -6,7 +6,7 @@ import type {
   SignedAuthorization,
   SignedPermit2Authorization,
 } from "../types.js";
-import { signEIP3009Authorization } from "../x402/eip3009.js";
+import { InFlightNonceTracker, signEIP3009Authorization } from "../x402/eip3009.js";
 import { signPermit2Authorization } from "../x402/permit2.js";
 import { erc20Balance, makePublicClient } from "./base.js";
 
@@ -28,6 +28,7 @@ export class ViemAdapter implements IWalletAdapter {
   readonly chain: string;
   private readonly account: LocalAccount;
   private readonly rpcUrl?: string;
+  private readonly nonces = new InFlightNonceTracker();
 
   constructor(cfg: ViemAdapterConfig) {
     this.account = privateKeyToAccount(cfg.privateKey);
@@ -48,10 +49,15 @@ export class ViemAdapter implements IWalletAdapter {
   }
 
   async authorizePayment(req: PaymentRequest): Promise<SignedAuthorization> {
-    return signEIP3009Authorization(req, this.account);
+    return signEIP3009Authorization(req, this.account, { tracker: this.nonces });
   }
 
   async authorizePaymentPermit2(req: PaymentRequest): Promise<SignedPermit2Authorization> {
     return signPermit2Authorization(req, this.account);
+  }
+
+  /** Release an EIP-3009 nonce once its authorization has settled or expired. */
+  releaseNonce(nonce: Hex): void {
+    this.nonces.release(nonce);
   }
 }

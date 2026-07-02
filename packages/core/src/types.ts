@@ -109,7 +109,8 @@ export interface EscalationTarget {
 
 // ─── Audit ──────────────────────────────────────────────────────────────────
 export interface Settlement {
-  txHash: Hex;
+  /** Present only on a successful settlement. */
+  txHash?: Hex;
   /** EIP-3009 nonce (when known) */
   nonce?: Hex;
   facilitator?: string;

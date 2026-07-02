@@ -137,19 +137,11 @@ export class AgentGuard {
       const intentCheck = await this.intent.check(req);
       const checks: PolicyCheck[] = [...policyChecks, ...anomalyChecks, intentCheck];
 
-      const hasCriticalBlock = checks.some((c) => !c.passed && c.severity === "critical");
-      const anomalyOver = score >= this.evaluator.anomalyThreshold;
-      const needsEscalation =
-        policyEscalate || (anomalyOver && this.evaluator.anomalyAction === "escalate");
-
-      let verdict: Verdict;
-      if (hasCriticalBlock || (anomalyOver && this.evaluator.anomalyAction === "block")) {
-        verdict = "block";
-      } else if (needsEscalation) {
-        verdict = "escalate";
-      } else {
-        verdict = "allow";
-      }
+      const verdict = aggregateVerdict(checks, score, {
+        anomalyThreshold: this.evaluator.anomalyThreshold,
+        anomalyAction: this.evaluator.anomalyAction,
+        policyEscalate,
+      });
 
       const decision: PolicyDecision = {
         verdict,
@@ -189,7 +181,7 @@ export class AgentGuard {
       const payload = await plainClient.createPaymentPayload(paymentRequired);
       const settleResp = await facilitator.settle(payload, requirements);
       const settlement: Settlement = {
-        txHash: settleResp.transaction as Hex,
+        txHash: settleResp.success ? (settleResp.transaction as Hex) : undefined,
         success: settleResp.success,
         facilitator: this.facilitatorUrl,
       };
@@ -200,7 +192,7 @@ export class AgentGuard {
       }
       await this.audit.record(req, decision, settlement);
       span.setAttribute("agentctl.executed", settlement.success);
-      span.setAttribute("agentctl.tx_hash", settlement.txHash);
+      if (settlement.txHash) span.setAttribute("agentctl.tx_hash", settlement.txHash);
       return { executed: settlement.success, decision, settlement, reason: settleResp.errorReason };
     });
   }
@@ -287,7 +279,9 @@ export class AgentGuard {
         if (!pending) return;
         const settlement: Settlement | undefined = ctx.settleResponse
           ? {
-              txHash: ctx.settleResponse.transaction as Hex,
+              txHash: ctx.settleResponse.success
+                ? (ctx.settleResponse.transaction as Hex)
+                : undefined,
               success: ctx.settleResponse.success,
               facilitator: this.facilitatorUrl,
             }
@@ -329,6 +323,32 @@ export class AgentGuard {
       accepts: [requirements],
     };
   }
+}
+
+/**
+ * Aggregate the three layers into a verdict. Policy/intent criticals (allowlist,
+ * spend-cap, intent mismatch) always hard-block; behavioral anomalies — including a
+ * critical amount spike — are routed through anomalyAction so an operator who chose
+ * "escalate" gets an escalation, not a silent hard block.
+ */
+export function aggregateVerdict(
+  checks: PolicyCheck[],
+  score: number,
+  opts: { anomalyThreshold: number; anomalyAction: "block" | "escalate"; policyEscalate: boolean },
+): Verdict {
+  const hardCritical = checks.some(
+    (c) => !c.passed && c.severity === "critical" && !c.id.startsWith("behavioral-"),
+  );
+  const behavioralCritical = checks.some(
+    (c) => !c.passed && c.severity === "critical" && c.id.startsWith("behavioral-"),
+  );
+  const anomalyTriggered = score >= opts.anomalyThreshold || behavioralCritical;
+
+  if (hardCritical || (anomalyTriggered && opts.anomalyAction === "block")) return "block";
+  if (opts.policyEscalate || (anomalyTriggered && opts.anomalyAction === "escalate")) {
+    return "escalate";
+  }
+  return "allow";
 }
 
 function buildReason(verdict: Verdict, checks: PolicyCheck[], score: number): string {
@@ -382,6 +402,7 @@ export {
   signEIP3009Authorization,
   inspectAuthorization,
   randomNonce,
+  InFlightNonceTracker,
 } from "./x402/eip3009.js";
 export {
   signPermit2Authorization,

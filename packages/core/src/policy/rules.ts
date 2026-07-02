@@ -71,10 +71,13 @@ export function checkAllowlist(rule: AllowlistRule, ctx: RuleContext): RuleResul
   const id = `allowlist-${rule.mode}`;
   const target =
     rule.mode === "recipients" ? ctx.req.recipient.toLowerCase() : (ctx.req.resourceUrl ?? "");
+  // Drop empty entries: for resources mode `target.includes("")` is always true,
+  // which would silently turn an enforced allowlist into a no-op.
+  const entries = rule.entries.filter((e) => e.length > 0);
   const ok =
     rule.mode === "recipients"
-      ? rule.entries.includes(target)
-      : rule.entries.some((e) => target.includes(e));
+      ? entries.includes(target)
+      : target.length > 0 && entries.some((e) => target.includes(e));
 
   if (ok) return pass(id, `${rule.mode} allowlisted`);
   if (rule.enforce) {
@@ -137,8 +140,10 @@ export function checkTimeWindow(rule: TimeWindowRule, ctx: RuleContext): RuleRes
   const id = "time-window";
   const hour = new Date(ctx.now).getUTCHours();
   const [start, end] = rule.allowedHours;
-  // Support windows that wrap past midnight (e.g. [22, 6]).
-  const inWindow = start <= end ? hour >= start && hour < end : hour >= start || hour < end;
+  // Support windows that wrap past midnight (e.g. [22, 6]); start === end means
+  // "no restriction" (24h) rather than a collapsed, always-blocking window.
+  const inWindow =
+    start === end ? true : start < end ? hour >= start && hour < end : hour >= start || hour < end;
   if (inWindow) {
     return pass(id, `${hour}:00 UTC within allowed ${start}-${end}`);
   }

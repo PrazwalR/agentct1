@@ -20,11 +20,42 @@ export function randomNonce(): Hex {
   return `0x${randomBytes(32).toString("hex")}`;
 }
 
+/**
+ * Tracks issued-but-unsettled EIP-3009 nonces (guide Part 2.6) so a network retry
+ * that re-signs never reuses an outstanding nonce and produces a double-spend.
+ * Reserve at sign time; release on settle/expiry.
+ */
+export class InFlightNonceTracker {
+  private readonly inflight = new Set<string>();
+
+  /** Reserve a unique nonce (regenerating if a supplied/random one is outstanding). */
+  reserve(nonce?: Hex): Hex {
+    let n = nonce ?? randomNonce();
+    while (this.inflight.has(n.toLowerCase())) n = randomNonce();
+    this.inflight.add(n.toLowerCase());
+    return n;
+  }
+
+  release(nonce: Hex): void {
+    this.inflight.delete(nonce.toLowerCase());
+  }
+
+  has(nonce: Hex): boolean {
+    return this.inflight.has(nonce.toLowerCase());
+  }
+
+  get size(): number {
+    return this.inflight.size;
+  }
+}
+
 export interface SignAuthorizationOptions {
   /** Validity window in seconds (default 3600 — generous for clock skew). */
   validForSeconds?: number;
-  /** Override the nonce (e.g. for in-flight tracking). */
+  /** Override the nonce (e.g. for idempotent retries). */
   nonce?: Hex;
+  /** Reserve the nonce through an in-flight tracker to prevent accidental reuse. */
+  tracker?: InFlightNonceTracker;
 }
 
 /**
@@ -48,7 +79,7 @@ export async function signEIP3009Authorization(
     value: req.amount,
     validAfter: 0n,
     validBefore: BigInt(now + (opts.validForSeconds ?? 3600)),
-    nonce: opts.nonce ?? randomNonce(),
+    nonce: opts.tracker ? opts.tracker.reserve(opts.nonce) : (opts.nonce ?? randomNonce()),
   };
 
   const signature = await account.signTypedData({

@@ -35,7 +35,10 @@ const counterpartyInput = z.object({
 
 const timeWindowInput = z.object({
   type: z.literal("time-window"),
-  allowedHours: z.tuple([z.coerce.number(), z.coerce.number()]),
+  allowedHours: z.tuple([
+    z.coerce.number().int().min(0).max(24),
+    z.coerce.number().int().min(0).max(24),
+  ]),
   action: z.enum(["block", "escalate", "warn"]).default("escalate"),
 });
 

@@ -73,12 +73,19 @@ export class AuditAnchorClient {
       chain: chain.viemChain,
       transport: http(this.cfg.rpcUrl ?? chain.defaultRpcUrl),
     });
-    return wallet.writeContract({
+    const txHash = await wallet.writeContract({
       address: this.cfg.contractAddress,
       abi: AUDIT_ANCHOR_ABI,
       functionName: "commitBatch",
       args: [root, BigInt(entryCount)],
     });
+    // Wait for the batch to actually mine, so a subsequent getBatchCount()
+    // reflects it. Without this, writeContract returns on broadcast and the
+    // batch index derived from getBatchCount() is off by one (first batch → -1).
+    await makePublicClient(this.cfg.chain, this.cfg.rpcUrl).waitForTransactionReceipt({
+      hash: txHash,
+    });
+    return txHash;
   }
 
   /** The committer's own address (the operator key in AuditAnchor). */

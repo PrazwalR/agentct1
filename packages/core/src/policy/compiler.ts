@@ -1,6 +1,6 @@
-import { type Address, parseUnits } from "viem";
+import type { Address } from "viem";
 import type { Policy, PolicyRule } from "../types.js";
-import { getChain } from "../constants.js";
+import { getChain, usdToTokenUnits } from "../constants.js";
 import { type RuleInput, compilerOutputSchema } from "./schema.js";
 
 const COMPILER_MODEL = "claude-haiku-4-5-20251001"; // fast + cheap for a parse task
@@ -104,16 +104,16 @@ function toPolicyRule(r: RuleInput, usdc: Address): PolicyRule {
       return {
         type: "spend-cap",
         window: r.window,
-        maxAmount: parseUnits(String(r.maxAmount), 6),
+        maxAmount: usdToTokenUnits(r.maxAmount),
         escalateAbove:
-          r.escalateAbove !== undefined ? parseUnits(String(r.escalateAbove), 6) : undefined,
+          r.escalateAbove !== undefined ? usdToTokenUnits(r.escalateAbove) : undefined,
         token: usdc,
       };
     case "allowlist":
       return {
         type: "allowlist",
         mode: r.mode,
-        entries: r.entries.map((e) => e.toLowerCase()),
+        entries: r.entries.map((e) => e.toLowerCase().trim()).filter((e) => e.length > 0),
         enforce: r.enforce,
       };
     case "rate-limit":

@@ -1,4 +1,4 @@
-import type { Address, Chain } from "viem";
+import { type Address, type Chain, parseUnits } from "viem";
 import { base, baseSepolia } from "viem/chains";
 
 export const USDC_DECIMALS = 6;
@@ -83,4 +83,19 @@ export const EIP3009_TOKENS: ReadonlySet<string> = new Set(
 /** Pick the authorization method for a token: EIP-3009 if supported, else Permit2. */
 export function recommendedAuthMethod(token: Address): AuthMethod {
   return EIP3009_TOKENS.has(token.toLowerCase()) ? "eip3009" : "permit2";
+}
+
+/**
+ * Convert a USD amount to 6-decimal token units. Formats via Intl (which never
+ * uses scientific notation, unlike String()/toFixed for very small or >=1e21
+ * numbers) so viem's parseUnits — which rejects "1e-7"/"1e+21" — never throws.
+ */
+export function usdToTokenUnits(usd: number | string): bigint {
+  const n = typeof usd === "string" ? Number(usd) : usd;
+  const decimal = n.toLocaleString("en-US", {
+    useGrouping: false,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 6,
+  });
+  return parseUnits(decimal, 6);
 }
