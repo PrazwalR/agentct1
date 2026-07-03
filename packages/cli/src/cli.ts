@@ -15,6 +15,8 @@ import {
   getChain,
   policyFromJSON,
   policyToJSON,
+  report,
+  simulatePolicy,
 } from "@agentctl/core";
 
 const DEFAULT_CHAIN = "eip155:84532";
@@ -99,17 +101,57 @@ program
       return;
     }
     for (const e of entries) {
-      const settle = e.settlement
-        ? e.settlement.success
+      const settle = !e.settlement
+        ? "—"
+        : e.settlement.txHash
           ? `tx ${e.settlement.txHash.slice(0, 12)}…`
-          : "settle-failed"
-        : "—";
+          : e.settlement.success
+            ? "settled"
+            : "settle-failed";
       console.log(
         `${new Date(e.timestamp).toISOString()}  ${e.decision.verdict.toUpperCase().padEnd(8)} ` +
           `${formatUnits(e.request.amount, 6)} USDC → ${e.request.recipient.slice(0, 10)}…  ${settle}  [${e.id.slice(0, 8)}]`,
       );
     }
     if (opts.verify) await verifyEntries(log, opts.chain, opts.agent);
+    await log.close();
+  });
+
+// ─── report (spending analytics) ─────────────────────────────────────────────
+program
+  .command("report")
+  .description("Spending + risk analytics over the audit log")
+  .option("--agent <id>", "filter by agent id")
+  .option("--db <file>", "audit sqlite path", DEFAULT_DB)
+  .option("--top <n>", "number of top counterparties", "5")
+  .action(async (opts) => {
+    const log = new AuditLogger(opts.db);
+    const entries = await log.list({ agentId: opts.agent });
+    const r = report(entries, { topN: Number(opts.top) });
+    if (r.total === 0) {
+      console.log("no audit entries");
+      await log.close();
+      return;
+    }
+    const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+    console.log(`\n  ${r.total} payments — ${r.settled} settled`);
+    console.log(
+      `  allow ${r.verdicts.allow}  escalate ${r.verdicts.escalate} (${pct(r.escalateRate)})  ` +
+        `block ${r.verdicts.block} (${pct(r.blockRate)})  anomalies ${r.anomalies}`,
+    );
+    console.log("  settled spend:");
+    for (const [token, units] of Object.entries(r.totalSpendByToken)) {
+      console.log(`    ${formatUnits(BigInt(units), 6)}  (${token.slice(0, 10)}…)`);
+    }
+    if (r.topCounterparties.length > 0) {
+      console.log("  top counterparties:");
+      for (const c of r.topCounterparties) {
+        console.log(
+          `    ${c.recipient.slice(0, 12)}…  ${c.count} payments  ${formatUnits(BigInt(c.totalSpend), 6)} USDC`,
+        );
+      }
+    }
+    console.log("");
     await log.close();
   });
 
@@ -180,6 +222,39 @@ program
     log.close();
     console.log(`recorded to ${opts.db} — run \`agentctl audit\` to see the trail.\n`);
     process.exitCode = 0;
+  });
+
+// ─── simulate (backtest a candidate policy against history) ──────────────────
+program
+  .command("simulate")
+  .description("Backtest a candidate policy against the recorded audit history")
+  .requiredOption("--policy <file>", "candidate policy JSON")
+  .option("--agent <id>", "filter by agent id")
+  .option("--db <file>", "audit sqlite path", DEFAULT_DB)
+  .action(async (opts) => {
+    const log = new AuditLogger(opts.db);
+    const history = await log.list({ agentId: opts.agent });
+    if (history.length === 0) {
+      console.log("no audit history to simulate against");
+      await log.close();
+      return;
+    }
+    const candidate = policyFromJSON(readFileSync(opts.policy, "utf8"));
+    const result = await simulatePolicy(history, candidate);
+
+    console.log(`\n  Backtest of ${opts.policy} over ${result.total} recorded payments:`);
+    console.log(
+      `  changed ${result.changed}  —  newly blocked ${result.newlyBlocked}, ` +
+        `newly escalated ${result.newlyEscalated}, newly allowed ${result.newlyAllowed}\n`,
+    );
+    for (const e of result.entries.filter((x) => x.changed).slice(0, 15)) {
+      console.log(
+        `  ● ${formatUnits(e.request.amount, 6)} USDC → ${e.request.recipient.slice(0, 10)}…  ` +
+          `${e.recordedVerdict.toUpperCase()} → ${e.simulatedVerdict.toUpperCase()}`,
+      );
+    }
+    if (result.changed === 0) console.log("  (no verdicts would change)");
+    await log.close();
   });
 
 // ─── eval (machine bridge: JSON in → JSON out) ───────────────────────────────

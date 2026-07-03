@@ -35,6 +35,8 @@ import {
 import { decisionAttrs, paymentAttrs, withSpan } from "./tracing.js";
 import { type ClientSvmSigner, registerSvmScheme } from "./x402/svm.js";
 import { SOLANA_MAINNET_CAIP2 } from "./solana.js";
+import { CircuitBreaker, type CircuitBreakerConfig } from "./circuit-breaker.js";
+import type { ApprovalQueue } from "./approval-queue.js";
 
 export interface GuardConfig {
   /** Wallet adapter used for signing + execution. */
@@ -57,8 +59,12 @@ export interface GuardConfig {
   onEscalation?: (req: PaymentRequest, decision: PolicyDecision) => Promise<boolean>;
   /** HMAC-signed webhook for human approval on escalate (used if onEscalation unset). */
   escalationWebhook?: WebhookEscalationOptions;
+  /** Human-in-the-loop queue: escalated payments park here until resolve()d. */
+  approvalQueue?: ApprovalQueue;
   /** Also accept Solana x402 payments: provide an SVM signer (and optional network). */
   solana?: { signer: ClientSvmSigner; network?: string };
+  /** Kill-switch: freeze the agent after repeated blocks/anomalies in a window. */
+  circuitBreaker?: CircuitBreakerConfig;
   /** Tuning for the behavioral Isolation Forest. */
   behavioral?: BehavioralOptions;
 }
@@ -87,7 +93,9 @@ export class AgentGuard {
   private readonly facilitatorFallbackUrls?: string[];
   private readonly rpcUrl?: string;
   private readonly onEscalation?: GuardConfig["onEscalation"];
+  private readonly _approvalQueue?: ApprovalQueue;
   private readonly solana?: GuardConfig["solana"];
+  private readonly breaker?: CircuitBreaker;
   private spine?: Spine;
 
   private constructor(policy: Policy, config: GuardConfig) {
@@ -100,10 +108,16 @@ export class AgentGuard {
     this.facilitatorUrl = config.facilitatorUrl ?? DEFAULT_TESTNET_FACILITATOR;
     this.facilitatorFallbackUrls = config.facilitatorFallbackUrls;
     this.rpcUrl = config.rpcUrl;
+    this._approvalQueue = config.approvalQueue;
     this.onEscalation =
       config.onEscalation ??
-      (config.escalationWebhook ? createWebhookEscalation(config.escalationWebhook) : undefined);
+      (config.approvalQueue
+        ? (req, decision) => config.approvalQueue!.enqueue(req, decision)
+        : config.escalationWebhook
+          ? createWebhookEscalation(config.escalationWebhook)
+          : undefined);
     this.solana = config.solana;
+    this.breaker = config.circuitBreaker ? new CircuitBreaker(config.circuitBreaker) : undefined;
   }
 
   /** Async factory — compiles NL policy if needed. */
@@ -125,12 +139,45 @@ export class AgentGuard {
     return this.audit.flush();
   }
 
+  /** The agent's circuit breaker, if configured (state / counts / manual reset). */
+  get circuitBreaker(): CircuitBreaker | undefined {
+    return this.breaker;
+  }
+
+  /** Manually close the circuit breaker after human review. */
+  resetCircuitBreaker(): void {
+    this.breaker?.reset();
+  }
+
+  /** The pending-approval queue, if configured (list / resolve escalated payments). */
+  get approvalQueue(): ApprovalQueue | undefined {
+    return this._approvalQueue;
+  }
+
   /**
    * Evaluate a payment against all three layers WITHOUT executing.
    * Returns a decision; call execute() (or use guardedFetch) to proceed.
    */
   async evaluate(req: PaymentRequest): Promise<PolicyDecision> {
     return withSpan("agentctl.evaluate", paymentAttrs(req), async (span) => {
+      if (this.breaker?.isOpen()) {
+        const decision: PolicyDecision = {
+          verdict: "block",
+          riskScore: 1,
+          checks: [
+            {
+              id: "circuit-breaker",
+              passed: false,
+              severity: "critical",
+              message: "circuit breaker open — agent frozen after repeated failures",
+            },
+          ],
+          reason: "Blocked: circuit breaker open (agent frozen; reset required)",
+        };
+        span.setAttributes(decisionAttrs(decision));
+        return decision;
+      }
+
       const { checks: policyChecks, escalate: policyEscalate } =
         await this.evaluator.evaluate(req);
       const { score, anomalyChecks } = await this.behavioral.score(req);
@@ -244,6 +291,11 @@ export class AgentGuard {
     req: PaymentRequest,
   ): Promise<{ decision: PolicyDecision; allowed: boolean }> {
     const decision = await this.evaluate(req);
+    // Feed real payment attempts to the breaker (dry-run evaluate() does not record).
+    if (this.breaker) {
+      const anomaly = decision.checks.some((c) => !c.passed && c.id.startsWith("behavioral-"));
+      this.breaker.record(decision.verdict, anomaly);
+    }
     if (decision.verdict === "block") return { decision, allowed: false };
     if (decision.verdict === "escalate") {
       const ok = this.onEscalation ? await this.onEscalation(req, decision) : false;
@@ -382,6 +434,14 @@ export type { BehavioralOptions, BehavioralResult } from "./behavioral/isolation
 export { IsolationForest } from "./behavioral/forest.js";
 export type { ForestOptions } from "./behavioral/forest.js";
 export { policyToJSON, policyFromJSON } from "./policy/serde.js";
+export { simulatePolicy } from "./policy/simulate.js";
+export type { SimulationResult, SimulationEntry } from "./policy/simulate.js";
+export { CircuitBreaker } from "./circuit-breaker.js";
+export type { CircuitBreakerConfig, CircuitState } from "./circuit-breaker.js";
+export { report } from "./analytics.js";
+export type { AnalyticsReport, CounterpartyStat } from "./analytics.js";
+export { ApprovalQueue } from "./approval-queue.js";
+export type { PendingApproval, ApprovalQueueOptions } from "./approval-queue.js";
 export { wrapPaymentTool, toPaymentRequest } from "./integrations.js";
 export type { PaymentToolInput, BlockedToolResult } from "./integrations.js";
 export {
