@@ -2,7 +2,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { Command } from "commander";
 import { type Address, formatUnits, parseUnits } from "viem";
 import { generatePrivateKey } from "viem/accounts";
+import { serveControlPlane } from "@agentctl/server";
 import {
+  ApprovalQueue,
   AuditAnchorClient,
   AuditLogger,
   type PaymentRequest,
@@ -255,6 +257,35 @@ program
     }
     if (result.changed === 0) console.log("  (no verdicts would change)");
     await log.close();
+  });
+
+// ─── serve (HTTP control plane) ──────────────────────────────────────────────
+program
+  .command("serve")
+  .description("Run the HTTP control plane (evaluate / approvals / breaker / report)")
+  .requiredOption("--policy <file>", "policy JSON")
+  .option("--port <n>", "port", "8787")
+  .option("--token <token>", "require Authorization: Bearer <token>")
+  .action(async (opts) => {
+    const policy = policyFromJSON(readFileSync(opts.policy, "utf8"));
+    const guard = await createGuard({
+      wallet: new ViemAdapter({ privateKey: generatePrivateKey() }),
+      policy,
+      approvalQueue: new ApprovalQueue(),
+      circuitBreaker: { windowSeconds: 3600, maxBlocks: 10, maxAnomalies: 5 },
+    });
+    const server = await serveControlPlane(guard, {
+      port: Number(opts.port),
+      token: opts.token,
+    });
+    const addr = server.address();
+    const port = addr && typeof addr === "object" ? addr.port : opts.port;
+    console.log(`agentctl control plane → http://127.0.0.1:${port}`);
+    console.log(
+      "  POST /evaluate · GET /approvals · POST /approvals/:id/(approve|deny) · " +
+        "GET+POST /breaker · GET /report",
+    );
+    if (opts.token) console.log("  (auth: Authorization: Bearer <token>)");
   });
 
 // ─── eval (machine bridge: JSON in → JSON out) ───────────────────────────────

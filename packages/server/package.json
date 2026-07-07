@@ -1,0 +1,28 @@
+{
+  "name": "@agentctl/server",
+  "version": "0.1.0",
+  "description": "agentctl HTTP control plane — evaluate, approvals, circuit breaker, report over HTTP",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agentctl/core": "workspace:*"
+  },
+  "devDependencies": {
+    "viem": "^2.53.1"
+  }
+}

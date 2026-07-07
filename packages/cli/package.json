@@ -6,13 +6,16 @@
   "bin": {
     "agentctl": "./dist/cli.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@agentctl/core": "workspace:*",
+    "@agentctl/server": "workspace:*",
     "commander": "^12.1.0",
     "viem": "^2.53.1"
   }

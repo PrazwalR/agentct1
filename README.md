@@ -47,12 +47,18 @@ multi-facilitator failover, the Isolation-Forest Phase-2 model (interface stubbe
 ## Layout
 
 ```
-packages/core    @agentctl/core  — engine, adapters, x402, audit
-packages/cli     @agentctl/cli   — the agentctl command (incl. `eval` JSON bridge)
-packages/python  agentctl (PyPI) — thin Python bindings + LangChain middleware
-crates/          agentctl-engine — optional Rust hot-path sidecar (HTTP)
-contracts        Foundry project — AuditAnchor.sol
+packages/core    @agentctl/core   — engine, adapters, x402, audit, breaker, approvals
+packages/server  @agentctl/server — HTTP control plane over a guard
+packages/cli     @agentctl/cli    — the agentctl command (check/simulate/report/serve/…)
+packages/python  agentctl (PyPI)  — thin Python bindings + LangChain middleware
+crates/          agentctl-engine  — optional Rust hot-path sidecar (HTTP)
+contracts        Foundry project  — AuditAnchor.sol
 ```
+
+Beyond the guide, agentctl adds a **circuit breaker** (freeze a compromised agent),
+**policy backtesting** (`agentctl simulate`), **spending analytics** (`agentctl report`),
+a **human-in-the-loop approval queue**, and an **HTTP control plane** (`agentctl serve`
+→ evaluate / approvals / breaker / report) so those are drivable from an operator UI.
 
 The Rust sidecar offloads the hot path at native speed: `POST /score` (Isolation
 Forest) and `POST /inspect/{eip3009,permit2}` (EIP-712 digest + signer recovery). Its

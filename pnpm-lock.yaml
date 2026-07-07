@@ -26,6 +26,9 @@ importers:
       '@agentctl/core':
         specifier: workspace:*
         version: link:../core
+      '@agentctl/server':
+        specifier: workspace:*
+        version: link:../server
       commander:
         specifier: ^12.1.0
         version: 12.1.0
@@ -87,6 +90,16 @@ importers:
       pg-mem:
         specifier: ^3.0.14
         version: 3.0.14
+
+  packages/server:
+    dependencies:
+      '@agentctl/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      viem:
+        specifier: ^2.53.1
+        version: 2.53.1(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)(zod@4.4.3)
 
 packages:
 
