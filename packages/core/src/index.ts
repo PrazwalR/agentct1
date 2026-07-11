@@ -37,14 +37,18 @@ import { type ClientSvmSigner, registerSvmScheme } from "./x402/svm.js";
 import { SOLANA_MAINNET_CAIP2 } from "./solana.js";
 import { CircuitBreaker, type CircuitBreakerConfig } from "./circuit-breaker.js";
 import type { ApprovalQueue } from "./approval-queue.js";
+import type { LLMConfig } from "./llm/client.js";
 
 export interface GuardConfig {
   /** Wallet adapter used for signing + execution. */
   wallet: IWalletAdapter;
   /** Policy — structured, or natural-language to be compiled. */
   policy: Policy | { naturalLanguage: string; agentId: string };
-  /** LLM API key for NL policy compilation + intent checks. */
+  /** Anthropic API key for NL policy compilation + intent checks. Shortcut for `llm: { apiKey }`. */
   llmApiKey?: string;
+  /** LLM config for NL policy compilation + intent checks — pass { provider: "ollama" } for a
+   *  local, zero-API-key option (needs `ollama serve` running). Overrides llmApiKey if both set. */
+  llm?: LLMConfig;
   /** Audit storage: "sqlite" (default) or a Postgres connection string. */
   auditStore?: string;
   /** On-chain Merkle anchor config. */
@@ -103,7 +107,7 @@ export class AgentGuard {
     this.wallet = config.wallet;
     this.evaluator = new PolicyEvaluator(policy);
     this.behavioral = new BehavioralScorer(policy.agentId, config.behavioral);
-    this.intent = new IntentReconciler(config.llmApiKey);
+    this.intent = new IntentReconciler(resolveGuardLLMConfig(config));
     this.audit = new AuditLogger(config.auditStore ?? "sqlite", config.anchor);
     this.facilitatorUrl = config.facilitatorUrl ?? DEFAULT_TESTNET_FACILITATOR;
     this.facilitatorFallbackUrls = config.facilitatorFallbackUrls;
@@ -124,7 +128,11 @@ export class AgentGuard {
   static async create(config: GuardConfig): Promise<AgentGuard> {
     const policy: Policy =
       "naturalLanguage" in config.policy
-        ? await compilePolicy(config.policy.naturalLanguage, config.policy.agentId, config.llmApiKey)
+        ? await compilePolicy(
+            config.policy.naturalLanguage,
+            config.policy.agentId,
+            resolveGuardLLMConfig(config),
+          )
         : config.policy;
     return new AgentGuard(policy, config);
   }
@@ -403,6 +411,11 @@ export function aggregateVerdict(
   return "allow";
 }
 
+/** `llm` (if set) takes precedence; `llmApiKey` is a back-compat shortcut for Anthropic. */
+function resolveGuardLLMConfig(config: GuardConfig): LLMConfig {
+  return config.llm ?? (config.llmApiKey ? { apiKey: config.llmApiKey } : {});
+}
+
 function buildReason(verdict: Verdict, checks: PolicyCheck[], score: number): string {
   const risk = `risk ${score.toFixed(2)}`;
   if (verdict === "allow") return `Allowed (${risk})`;
@@ -428,6 +441,8 @@ export { createRemoteSignerAccount, eip712ToJson } from "./adapters/remote-signe
 export type { CircleAdapterConfig } from "./adapters/circle.js";
 export type { PrivyAdapterConfig } from "./adapters/privy.js";
 export { compilePolicy, compilePolicyObject } from "./policy/compiler.js";
+export { callLLM, resolveLLMConfig } from "./llm/client.js";
+export type { LLMConfig, LLMProvider, LLMCallParams } from "./llm/client.js";
 export { PolicyEvaluator } from "./policy/evaluator.js";
 export { BehavioralScorer } from "./behavioral/isolation.js";
 export type { BehavioralOptions, BehavioralResult } from "./behavioral/isolation.js";

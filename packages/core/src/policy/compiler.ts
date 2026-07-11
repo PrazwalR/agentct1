@@ -1,9 +1,8 @@
 import type { Address } from "viem";
 import type { Policy, PolicyRule } from "../types.js";
 import { getChain, usdToTokenUnits } from "../constants.js";
+import { type LLMConfig, callLLM } from "../llm/client.js";
 import { type RuleInput, compilerOutputSchema } from "./schema.js";
-
-const COMPILER_MODEL = "claude-haiku-4-5-20251001"; // fast + cheap for a parse task
 
 const COMPILER_SYSTEM_PROMPT = `You are a policy compiler for AI agent payments.
 Convert the user's natural-language spending policy into a strict JSON structure.
@@ -24,45 +23,26 @@ spend-cap. If they mention human approval for large amounts, use escalateAbove. 
 "only known/used-before services", add a counterparty rule with action "escalate". If they
 mention night/business hours, add a time-window rule.`;
 
-interface AnthropicResponse {
-  content?: Array<{ type: string; text?: string }>;
-}
-
 /**
- * Compile a natural-language spending policy into a structured Policy via Claude
- * Haiku, validating the model's JSON with zod before trusting it.
+ * Compile a natural-language spending policy into a structured Policy via a
+ * fast LLM, validating the model's JSON with zod before trusting it.
+ *
+ * The third argument accepts either a plain Anthropic API key (back-compat) or
+ * a full LLMConfig — pass `{ provider: "ollama" }` to compile locally with zero
+ * API key, using Ollama (`ollama serve`, default model `llama3.2`).
  */
 export async function compilePolicy(
   naturalLanguage: string,
   agentId: string,
-  apiKey?: string,
+  llm?: string | LLMConfig,
 ): Promise<Policy> {
-  const key = apiKey ?? process.env.ANTHROPIC_API_KEY;
-  if (!key) {
-    throw new Error("LLM API key required to compile a natural-language policy");
-  }
-
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": key,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: COMPILER_MODEL,
-      max_tokens: 1500,
-      system: COMPILER_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: naturalLanguage }],
-    }),
+  const cfg: LLMConfig = typeof llm === "string" ? { apiKey: llm } : (llm ?? {});
+  const text = await callLLM(cfg, {
+    system: COMPILER_SYSTEM_PROMPT,
+    prompt: naturalLanguage,
+    maxTokens: 1500,
+    json: true,
   });
-
-  if (!res.ok) {
-    throw new Error(`Policy compiler LLM call failed: ${res.status} ${await res.text()}`);
-  }
-
-  const data = (await res.json()) as AnthropicResponse;
-  const text = data.content?.find((b) => b.type === "text")?.text ?? "";
   const json = extractJson(text);
 
   return compilePolicyObject(json, agentId, naturalLanguage);

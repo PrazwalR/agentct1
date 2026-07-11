@@ -113,7 +113,8 @@ fn struct_hash_permit2(a: &Permit2Auth) -> [u8; 32] {
         buf.extend_from_slice(&addr_word(&a.witness_to));
         buf.extend_from_slice(&u256_word(&a.witness_valid_after));
         keccak256(&buf).0
-    };
+    }
+    
 
     let mut buf = Vec::new();
     buf.extend_from_slice(type_hash.as_slice());

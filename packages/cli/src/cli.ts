@@ -7,6 +7,8 @@ import {
   ApprovalQueue,
   AuditAnchorClient,
   AuditLogger,
+  type LLMConfig,
+  type LLMProvider,
   type PaymentRequest,
   type Policy,
   type PolicyDecision,
@@ -23,6 +25,16 @@ import {
 
 const DEFAULT_CHAIN = "eip155:84532";
 const DEFAULT_DB = "./agentctl.sqlite";
+
+/** Shared --provider/--ollama-url/--model flags -> LLMConfig (env auto-detect if unset). */
+function resolveCliLLM(opts: { provider?: string; ollamaUrl?: string; model?: string }): LLMConfig {
+  return {
+    provider: opts.provider as LLMProvider | undefined,
+    baseUrl: opts.ollamaUrl,
+    model: opts.model,
+  };
+}
+
 
 const program = new Command();
 program
@@ -41,7 +53,10 @@ program
   .option("--chain <caip2>", "CAIP-2 chain id", DEFAULT_CHAIN)
   .option("--policy <file>", "policy JSON file (default: built-in demo policy)")
   .option("--agent <id>", "agent id", "cli-agent")
-  .option("--llm", "enable the LLM intent check (needs ANTHROPIC_API_KEY)")
+  .option("--llm", "enable the LLM intent check (Anthropic key or a local Ollama)")
+  .option("--provider <name>", "llm provider: anthropic or ollama (default: auto-detect from env)")
+  .option("--ollama-url <url>", "ollama server URL (default http://127.0.0.1:11434)")
+  .option("--model <name>", "override the provider's default model")
   .action(async (opts) => {
     const chain: string = opts.chain;
     const cfg = getChain(chain);
@@ -53,7 +68,7 @@ program
     const guard = await createGuard({
       wallet,
       policy,
-      llmApiKey: opts.llm ? process.env.ANTHROPIC_API_KEY : undefined,
+      llm: opts.llm ? resolveCliLLM(opts) : undefined,
     });
 
     const token =
@@ -74,12 +89,15 @@ program
 const policyCmd = program.command("policy").description("Manage policies");
 policyCmd
   .command("create")
-  .description("Compile a natural-language policy into JSON (uses Claude Haiku)")
+  .description("Compile a natural-language policy into JSON (Anthropic, or a local Ollama)")
   .requiredOption("--agent <id>", "agent id")
   .requiredOption("--text <nl>", "natural-language policy")
   .option("--out <file>", "output file (default: <agent>.policy.json)")
+  .option("--provider <name>", "llm provider: anthropic or ollama (default: auto-detect from env)")
+  .option("--ollama-url <url>", "ollama server URL (default http://127.0.0.1:11434)")
+  .option("--model <name>", "override the provider's default model")
   .action(async (opts) => {
-    const policy = await compilePolicy(opts.text, opts.agent, process.env.ANTHROPIC_API_KEY);
+    const policy = await compilePolicy(opts.text, opts.agent, resolveCliLLM(opts));
     const out: string = opts.out ?? `${opts.agent}.policy.json`;
     writeFileSync(out, policyToJSON(policy));
     console.log(`✓ wrote ${out} (${policy.rules.length} rules)`);
@@ -296,10 +314,15 @@ program
     const { policy: policyInput, request } = JSON.parse(await readStdin());
     const agentId: string = request.agentId ?? "bridge-agent";
     const policy = compilePolicyObject(policyInput, agentId);
+    // request.llm may be `true` (env auto-detect — Anthropic or Ollama, whichever is
+    // configured) or an explicit { provider, baseUrl, model } object, e.g. from the
+    // Python bridge choosing Ollama without any API key.
+    const llm: LLMConfig | undefined =
+      request.llm && typeof request.llm === "object" ? (request.llm as LLMConfig) : request.llm ? {} : undefined;
     const guard = await createGuard({
       wallet: new ViemAdapter({ privateKey: generatePrivateKey(), chain: request.chain }),
       policy,
-      llmApiKey: request.llm ? process.env.ANTHROPIC_API_KEY : undefined,
+      llm,
     });
     const req: PaymentRequest = {
       intent: request.intent ?? "",

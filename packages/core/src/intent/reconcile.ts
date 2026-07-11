@@ -1,13 +1,15 @@
 import { formatUnits, parseUnits } from "viem";
 import type { PaymentRequest, PolicyCheck } from "../types.js";
 import { intentVerdictSchema } from "../policy/schema.js";
-
-const INTENT_MODEL = "claude-haiku-4-5-20251001";
+import { type LLMConfig, type LLMProvider, callLLM, resolveLLMConfig } from "../llm/client.js";
 
 export interface IntentReconcilerOptions {
   /** Skip the LLM semantic check below this amount (token units). Default $1. */
   minAmountForLlm?: bigint;
   model?: string;
+  provider?: LLMProvider;
+  /** Ollama server URL, if provider is "ollama". */
+  baseUrl?: string;
 }
 
 /**
@@ -20,19 +22,23 @@ export interface IntentReconcilerOptions {
  * an amount threshold so sub-dollar micropayments don't each incur an LLM call.
  */
 export class IntentReconciler {
-  private readonly apiKey?: string;
+  private readonly llmConfig: LLMConfig;
   private readonly minAmount: bigint;
-  private readonly model: string;
 
-  constructor(apiKey?: string, opts: IntentReconcilerOptions = {}) {
-    this.apiKey = apiKey;
+  constructor(apiKeyOrConfig?: string | LLMConfig, opts: IntentReconcilerOptions = {}) {
+    const base: LLMConfig = typeof apiKeyOrConfig === "string" ? { apiKey: apiKeyOrConfig } : (apiKeyOrConfig ?? {});
+    this.llmConfig = {
+      ...base,
+      provider: opts.provider ?? base.provider,
+      model: opts.model ?? base.model,
+      baseUrl: opts.baseUrl ?? base.baseUrl,
+    };
     this.minAmount = opts.minAmountForLlm ?? parseUnits("1", 6);
-    this.model = opts.model ?? INTENT_MODEL;
   }
 
   async check(req: PaymentRequest): Promise<PolicyCheck> {
-    if (!this.apiKey) {
-      return info("intent semantic check skipped (no LLM key)");
+    if (!resolveLLMConfig(this.llmConfig)) {
+      return info("intent semantic check skipped (no LLM configured)");
     }
     if (req.amount < this.minAmount) {
       return info(`intent check skipped (below ${formatUnits(this.minAmount, 6)} USDC threshold)`);
@@ -63,24 +69,7 @@ Does this payment plausibly fulfill the stated intent? Consider whether the amou
 is reasonable for the stated purpose and whether anything looks inconsistent.
 Respond with JSON only: { "consistent": true|false, "concern": "<brief reason if inconsistent>" }`;
 
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": this.apiKey!,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: this.model,
-        max_tokens: 300,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-
-    if (!res.ok) throw new Error(`LLM ${res.status}`);
-
-    const data = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
-    const text = data.content?.find((b) => b.type === "text")?.text ?? "";
+    const text = await callLLM(this.llmConfig, { prompt, maxTokens: 300, json: true });
     const parsed = intentVerdictSchema.safeParse(
       JSON.parse(text.replace(/```json|```/g, "").trim()),
     );

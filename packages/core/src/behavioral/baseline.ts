@@ -59,4 +59,6 @@ export class EWMABaseline {
   getHistoricalVectors(): number[][] {
     return this.historicalVectors;
   }
+
 }
+

@@ -110,8 +110,11 @@ a programmatic payment through the x402 facilitator.
 # Dry-run a payment against a policy (built-in demo policy if --policy omitted)
 agentctl check --amount 15 --recipient 0x9999…99 --intent "buy compute"
 
-# Compile a natural-language policy to JSON (needs ANTHROPIC_API_KEY)
+# Compile a natural-language policy to JSON — Anthropic (needs ANTHROPIC_API_KEY),
+# or a local Ollama (zero API key: `ollama serve` + `ollama pull llama3.2`)
 agentctl policy create --agent research-agent-1 \
+  --text "max \$20/day, escalate over \$2, only known APIs"
+agentctl policy create --agent research-agent-1 --provider ollama \
   --text "max \$20/day, escalate over \$2, only known APIs"
 
 # The killer demo — allow → escalate → block, recorded to the audit log
@@ -146,9 +149,19 @@ forge script script/Deploy.s.sol --root contracts --rpc-url base_sepolia --broad
 6. **Use *with* provider-level controls, not instead of them.** Defense in depth: provider
    TEE caps are the hard floor, agentctl is the intelligent layer above.
 
+## LLM provider
+
+The policy compiler and intent check work with either:
+- **Anthropic** (`ANTHROPIC_API_KEY`) — default if set.
+- **Ollama**, local, zero API key — run `ollama serve` + `ollama pull llama3.2`, then either
+  set `OLLAMA_BASE_URL` or pass `{ provider: "ollama" }` / `--provider ollama` explicitly.
+  Both compilePolicy/IntentReconciler and the CLI accept `{ provider, baseUrl, model }`.
+  If neither is configured, both checks degrade gracefully (skip, don't throw) — the guard's
+  policy/behavioral layers work with zero LLM configured at all.
+
 ## Environment
 
-See [.env.example](.env.example). Key vars: `ANTHROPIC_API_KEY` (compiler + intent),
+See [.env.example](.env.example). Key vars: `ANTHROPIC_API_KEY` or `OLLAMA_BASE_URL` (compiler + intent),
 `CDP_API_KEY_ID`/`CDP_API_KEY_SECRET`/`CDP_WALLET_SECRET` or `AGENT_PRIVATE_KEY` (wallet),
 `X402_FACILITATOR_URL`, `RPC_BASE_SEPOLIA`, `AUDIT_ANCHOR_ADDRESS`, `ANCHOR_COMMITTER_KEY`.
 
