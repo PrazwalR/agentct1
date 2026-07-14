@@ -54,11 +54,7 @@ export interface Policy {
 }
 
 export type PolicyRule =
-  | SpendCapRule
-  | AllowlistRule
-  | RateLimitRule
-  | CounterpartyRule
-  | TimeWindowRule;
+  SpendCapRule | AllowlistRule | RateLimitRule | CounterpartyRule | TimeWindowRule;
 
 export type SpendWindow = "transaction" | "session" | "hour" | "day";
 
@@ -142,10 +138,19 @@ export interface IWalletAdapter {
    * This is the choke point the x402 client signs through.
    */
   getSigner(): Promise<LocalAccount>;
-  /** Build + sign an EIP-3009 authorization WITHOUT settling (manual path + verification) */
+  /**
+   * Build + sign an EIP-3009 authorization WITHOUT settling (manual path for a
+   * caller building their own settlement flow outside guard.execute()/guardedFetch()
+   * — those go through the x402 client's own signer and never call this). If the
+   * adapter implements releaseNonce, the caller of THIS method owns the resulting
+   * nonce's lifecycle and should release it once the authorization settles, fails,
+   * or expires.
+   */
   authorizePayment(req: PaymentRequest): Promise<SignedAuthorization>;
   /** Build + sign a Permit2 witness authorization (any ERC-20, incl. USDT). Optional. */
   authorizePaymentPermit2?(req: PaymentRequest): Promise<SignedPermit2Authorization>;
+  /** Release a nonce reserved by authorizePayment(). See authorizePayment's docs. */
+  releaseNonce?(nonce: Hex): void;
 }
 
 export interface SignedAuthorization {

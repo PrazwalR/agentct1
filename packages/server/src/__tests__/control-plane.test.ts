@@ -62,12 +62,21 @@ describe("control plane", () => {
   it("lists and resolves pending approvals", async () => {
     const { queue, base } = await boot();
     const pending = queue.enqueue(
-      { intent: "x", amount: parseUnits("15", 6), token: USDC, recipient: A, chain: "eip155:84532", agentId: "a" },
+      {
+        intent: "x",
+        amount: parseUnits("15", 6),
+        token: USDC,
+        recipient: A,
+        chain: "eip155:84532",
+        agentId: "a",
+      },
       { verdict: "escalate", riskScore: 0.5, checks: [], reason: "" },
       60,
     );
 
-    const list = (await (await fetch(`${base}/approvals`)).json()) as { pending: Array<{ id: string }> };
+    const list = (await (await fetch(`${base}/approvals`)).json()) as {
+      pending: Array<{ id: string }>;
+    };
     expect(list.pending.length).toBe(1);
 
     const resolved = (await (
@@ -90,10 +99,33 @@ describe("control plane", () => {
     expect(closed.state).toBe("closed");
   });
 
-  it("enforces the bearer token when configured", async () => {
+  it("enforces the bearer token on protected routes, but /health stays open", async () => {
     const { base } = await boot({ token: "secret" });
-    expect((await fetch(`${base}/health`)).status).toBe(401);
-    const ok = await fetch(`${base}/health`, { headers: { authorization: "Bearer secret" } });
+
+    // /health is exempt by design — orchestrator liveness probes can't send headers.
+    expect((await fetch(`${base}/health`)).status).toBe(200);
+
+    expect((await fetch(`${base}/breaker`)).status).toBe(401);
+    const ok = await fetch(`${base}/breaker`, { headers: { authorization: "Bearer secret" } });
     expect(ok.status).toBe(200);
+  });
+
+  it("rate-limits a client after the configured max, but never /health", async () => {
+    const { base } = await boot({ rateLimit: { windowMs: 60_000, max: 3 } });
+
+    for (let i = 0; i < 3; i++) {
+      expect((await fetch(`${base}/breaker`)).status).toBe(200);
+    }
+    expect((await fetch(`${base}/breaker`)).status).toBe(429);
+
+    // /health bypasses the limiter entirely, even once the client is capped.
+    expect((await fetch(`${base}/health`)).status).toBe(200);
+  });
+
+  it("rateLimit: false disables the limiter", async () => {
+    const { base } = await boot({ rateLimit: false });
+    for (let i = 0; i < 10; i++) {
+      expect((await fetch(`${base}/breaker`)).status).toBe(200);
+    }
   });
 });

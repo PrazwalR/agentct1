@@ -12,7 +12,7 @@ async fn call(method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Valu
         .header("content-type", "application/json")
         .body(body.map(|b| Body::from(b.to_string())).unwrap_or_else(Body::empty))
         .unwrap();
-    let response = app().oneshot(request).await.unwrap();
+    let response = app(None).oneshot(request).await.unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
@@ -22,7 +22,7 @@ async fn call(method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Valu
 #[tokio::test]
 async fn health_returns_ok() {
     let request = Request::builder().uri("/health").body(Body::empty()).unwrap();
-    let response = app().oneshot(request).await.unwrap();
+    let response = app(None).oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&bytes[..], b"ok");
@@ -107,4 +107,65 @@ async fn inspect_permit2_recovers_the_signer() {
         "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
     );
     assert_eq!(value["amount"], json!("100000"));
+}
+
+#[tokio::test]
+async fn health_is_exempt_from_the_bearer_token() {
+    let request = Request::builder().uri("/health").body(Body::empty()).unwrap();
+    let response = app(Some("secret".into())).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn protected_routes_reject_a_missing_or_wrong_bearer_token() {
+    let body = json!({"vectors": [[1.0]], "point": [1.0]});
+    let no_auth = Request::builder()
+        .method("POST")
+        .uri("/score")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app(Some("secret".into())).oneshot(no_auth).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let wrong_auth = Request::builder()
+        .method("POST")
+        .uri("/score")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer nope")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app(Some("secret".into())).oneshot(wrong_auth).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn protected_routes_accept_the_correct_bearer_token() {
+    let body = json!({"vectors": [[1.0]], "point": [1.0]});
+    let request = Request::builder()
+        .method("POST")
+        .uri("/score")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer secret")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app(Some("secret".into())).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn score_respects_a_custom_anomaly_threshold() {
+    let mut vectors = Vec::new();
+    for i in 0..120u32 {
+        let i = i as f64;
+        vectors.push(vec![80000.0 + (i * 137.0) % 40000.0, 1.0 + (i * 7.0) % 60.0]);
+    }
+    let body = json!({
+        "vectors": vectors, "point": [95000.0, 30.0],
+        "trees": 60, "sample_size": 64, "seed": 3, "anomaly_threshold": 0.99
+    });
+    let (status, value) = call("POST", "/score", Some(body)).await;
+    assert_eq!(status, StatusCode::OK);
+    // A threshold of 0.99 should not flag a middling, in-distribution point.
+    assert_eq!(value["anomaly"], json!(false));
 }

@@ -21,11 +21,7 @@ export {
 } from "./permit2.js";
 export type { Permit2SignOptions, InspectedPermit2 } from "./permit2.js";
 
-export {
-  intentStore,
-  headerValue,
-  requirementsToPaymentRequest,
-} from "./interceptor.js";
+export { intentStore, headerValue, requirementsToPaymentRequest } from "./interceptor.js";
 export type { IntentStore, GuardedFetchOptions } from "./interceptor.js";
 
 /**

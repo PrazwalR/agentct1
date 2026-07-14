@@ -30,11 +30,17 @@ mention night/business hours, add a time-window rule.`;
  * The third argument accepts either a plain Anthropic API key (back-compat) or
  * a full LLMConfig — pass `{ provider: "ollama" }` to compile locally with zero
  * API key, using Ollama (`ollama serve`, default model `llama3.2`).
+ *
+ * `chain` selects which chain's USDC address spend-cap rules are denominated
+ * in (default Base Sepolia, back-compat). Get this wrong and a spend-cap rule
+ * silently never matches the payment token it's evaluated against — pass the
+ * chain the guard will actually run on.
  */
 export async function compilePolicy(
   naturalLanguage: string,
   agentId: string,
   llm?: string | LLMConfig,
+  chain?: string,
 ): Promise<Policy> {
   const cfg: LLMConfig = typeof llm === "string" ? { apiKey: llm } : (llm ?? {});
   const text = await callLLM(cfg, {
@@ -45,20 +51,27 @@ export async function compilePolicy(
   });
   const json = extractJson(text);
 
-  return compilePolicyObject(json, agentId, naturalLanguage);
+  return compilePolicyObject(json, agentId, naturalLanguage, chain);
 }
 
 /**
  * Build a Policy from an already-structured object (the compiler-output shape,
  * USD amounts) without calling an LLM. Validates with zod and converts USD →
  * token units. Used by the CLI `eval` command and the Python bridge.
+ *
+ * `chain` (default Base Sepolia, back-compat) — see compilePolicy's note above.
  */
-export function compilePolicyObject(input: unknown, agentId: string, sourceText?: string): Policy {
+export function compilePolicyObject(
+  input: unknown,
+  agentId: string,
+  sourceText?: string,
+  chain = "eip155:84532",
+): Policy {
   const parsed = compilerOutputSchema.safeParse(input);
   if (!parsed.success) {
-    throw new Error(`Invalid policy: ${parsed.error.message}`);
+    throw new Error(`invalid policy: ${parsed.error.message}`);
   }
-  const usdc = getChain("eip155:84532").usdc; // default policy chain: Base Sepolia
+  const usdc = getChain(chain).usdc;
   return {
     agentId,
     rules: parsed.data.rules.map((r) => toPolicyRule(r, usdc)),
@@ -85,8 +98,7 @@ function toPolicyRule(r: RuleInput, usdc: Address): PolicyRule {
         type: "spend-cap",
         window: r.window,
         maxAmount: usdToTokenUnits(r.maxAmount),
-        escalateAbove:
-          r.escalateAbove !== undefined ? usdToTokenUnits(r.escalateAbove) : undefined,
+        escalateAbove: r.escalateAbove !== undefined ? usdToTokenUnits(r.escalateAbove) : undefined,
         token: usdc,
       };
     case "allowlist":

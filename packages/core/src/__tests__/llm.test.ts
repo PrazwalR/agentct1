@@ -19,11 +19,19 @@ function fakeOllama(content: string): Promise<{ url: string; lastRequest: () => 
   return new Promise((resolve) => {
     server = createServer((req, res) => {
       let body = "";
-      req.on("data", (c) => (body += c)).on("end", () => {
-        captured = JSON.parse(body);
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ model: "llama3.2", message: { role: "assistant", content }, done: true }));
-      });
+      req
+        .on("data", (c) => (body += c))
+        .on("end", () => {
+          captured = JSON.parse(body);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              model: "llama3.2",
+              message: { role: "assistant", content },
+              done: true,
+            }),
+          );
+        });
     });
     server.listen(0, "127.0.0.1", () => {
       const { port } = server!.address() as AddressInfo;
@@ -33,16 +41,20 @@ function fakeOllama(content: string): Promise<{ url: string; lastRequest: () => 
 }
 
 /** Spin up a fake Anthropic /v1/messages endpoint. */
-function fakeAnthropic(text: string): Promise<{ url: string; lastHeaders: () => Record<string, unknown> }> {
+function fakeAnthropic(
+  text: string,
+): Promise<{ url: string; lastHeaders: () => Record<string, unknown> }> {
   let headers: Record<string, unknown> = {};
   return new Promise((resolve) => {
     server = createServer((req, res) => {
       headers = req.headers;
       let body = "";
-      req.on("data", (c) => (body += c)).on("end", () => {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ content: [{ type: "text", text }] }));
-      });
+      req
+        .on("data", (c) => (body += c))
+        .on("end", () => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ content: [{ type: "text", text }] }));
+        });
     });
     server.listen(0, "127.0.0.1", () => {
       const { port } = server!.address() as AddressInfo;

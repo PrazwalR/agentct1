@@ -51,9 +51,7 @@ export function rowToEntry(row: AuditRow): AuditEntry {
     agentId: row.agent_id,
     request: deserializeRequest(row.request_json),
     decision: JSON.parse(row.decision_json) as PolicyDecision,
-    settlement: row.settlement_json
-      ? (JSON.parse(row.settlement_json) as Settlement)
-      : undefined,
+    settlement: row.settlement_json ? (JSON.parse(row.settlement_json) as Settlement) : undefined,
     entryHash: row.entry_hash as Hex,
   };
 }
@@ -123,8 +121,7 @@ export class SqliteAuditStore implements AuditStore {
 
   async getById(id: string): Promise<StoredEntry | undefined> {
     const row = this.db().prepare("SELECT * FROM audit_entries WHERE id = ?").get(id) as
-      | AuditRow
-      | undefined;
+      AuditRow | undefined;
     if (!row) return undefined;
     return { entry: rowToEntry(row), batchIndex: batchIndexOf(row) };
   }

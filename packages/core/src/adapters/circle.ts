@@ -5,7 +5,7 @@ import type {
   SignedAuthorization,
   SignedPermit2Authorization,
 } from "../types.js";
-import { signEIP3009Authorization } from "../x402/eip3009.js";
+import { InFlightNonceTracker, signEIP3009Authorization } from "../x402/eip3009.js";
 import { signPermit2Authorization } from "../x402/permit2.js";
 import { erc20Balance, makePublicClient } from "./base.js";
 import { createRemoteSignerAccount, eip712ToJson } from "./remote-signer.js";
@@ -35,6 +35,7 @@ export class CircleAdapter implements IWalletAdapter {
   readonly provider = "circle";
   readonly chain: string;
   private signer?: LocalAccount;
+  private readonly nonces = new InFlightNonceTracker();
 
   constructor(private readonly cfg: CircleAdapterConfig) {
     this.chain = cfg.chain ?? "eip155:84532";
@@ -42,13 +43,15 @@ export class CircleAdapter implements IWalletAdapter {
 
   private async ensureSigner(): Promise<LocalAccount> {
     if (this.signer) return this.signer;
-    const { initiateDeveloperControlledWalletsClient } = await import(
-      "@circle-fin/developer-controlled-wallets"
-    );
-    const client = initiateDeveloperControlledWalletsClient({
-      apiKey: this.cfg.apiKey ?? process.env.CIRCLE_API_KEY ?? "",
-      entitySecret: this.cfg.entitySecret ?? process.env.CIRCLE_ENTITY_SECRET ?? "",
-    });
+    const apiKey = this.cfg.apiKey ?? process.env.CIRCLE_API_KEY;
+    const entitySecret = this.cfg.entitySecret ?? process.env.CIRCLE_ENTITY_SECRET;
+    if (!apiKey) throw new Error("CircleAdapter: CIRCLE_API_KEY not set (config.apiKey or env)");
+    if (!entitySecret) {
+      throw new Error("CircleAdapter: CIRCLE_ENTITY_SECRET not set (config.entitySecret or env)");
+    }
+    const { initiateDeveloperControlledWalletsClient } =
+      await import("@circle-fin/developer-controlled-wallets");
+    const client = initiateDeveloperControlledWalletsClient({ apiKey, entitySecret });
     this.signer = createRemoteSignerAccount(this.cfg.address, async (params) => {
       const res = await client.signTypedData({
         walletId: this.cfg.walletId,
@@ -74,10 +77,15 @@ export class CircleAdapter implements IWalletAdapter {
   }
 
   async authorizePayment(req: PaymentRequest): Promise<SignedAuthorization> {
-    return signEIP3009Authorization(req, await this.ensureSigner());
+    return signEIP3009Authorization(req, await this.ensureSigner(), { tracker: this.nonces });
   }
 
   async authorizePaymentPermit2(req: PaymentRequest): Promise<SignedPermit2Authorization> {
     return signPermit2Authorization(req, await this.ensureSigner());
+  }
+
+  /** Release an EIP-3009 nonce once its authorization has settled or expired. */
+  releaseNonce(nonce: Hex): void {
+    this.nonces.release(nonce);
   }
 }

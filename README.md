@@ -7,7 +7,7 @@ produces a tamper-evident audit trail for every autonomous x402 payment. It is t
 safety + audit layer that agent-wallet providers assume you'll build yourself.
 
 - **Not a wallet** — it never holds keys or custody. It wraps wallets you already use.
-- **Not a facilitator** — it decides whether a payment *should* proceed, then hands
+- **Not a facilitator** — it decides whether a payment _should_ proceed, then hands
   signing + settlement to the real x402 client / facilitator.
 - **Harm reduction, not a guarantee** — it narrows the attack surface; it does not
   eliminate it.
@@ -87,8 +87,7 @@ import { createGuardedFetch } from "@agentctl/core/x402";
 const guard = await createGuard({
   wallet: new ViemAdapter({ privateKey: process.env.AGENT_PRIVATE_KEY as `0x${string}` }),
   policy: {
-    naturalLanguage:
-      "max $20/day, escalate anything over $2, only pay services you've used before",
+    naturalLanguage: "max $20/day, escalate anything over $2, only pay services you've used before",
     agentId: "research-agent-1",
   },
   llmApiKey: process.env.ANTHROPIC_API_KEY,
@@ -143,15 +142,16 @@ forge script script/Deploy.s.sol --root contracts --rpc-url base_sepolia --broad
 3. **The intent reconciler adds latency + cost.** Each semantic check is an LLM call, so
    it is gated by an amount threshold (default $1) rather than run on every micropayment.
 4. **The anchor proves integrity, not correctness.** It proves a log entry wasn't altered
-   after commitment — not that the decision was *correct*.
+   after commitment — not that the decision was _correct_.
 5. **Coupled to x402's trajectory.** The policy/behavioral/audit layers are
    protocol-agnostic; the x402 adapter is the coupling point.
-6. **Use *with* provider-level controls, not instead of them.** Defense in depth: provider
+6. **Use _with_ provider-level controls, not instead of them.** Defense in depth: provider
    TEE caps are the hard floor, agentctl is the intelligent layer above.
 
 ## LLM provider
 
 The policy compiler and intent check work with either:
+
 - **Anthropic** (`ANTHROPIC_API_KEY`) — default if set.
 - **Ollama**, local, zero API key — run `ollama serve` + `ollama pull llama3.2`, then either
   set `OLLAMA_BASE_URL` or pass `{ provider: "ollama" }` / `--provider ollama` explicitly.

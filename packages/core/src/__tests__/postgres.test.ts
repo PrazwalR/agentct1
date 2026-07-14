@@ -14,7 +14,7 @@ function mkReq(i: number): PaymentRequest {
     intent: "buy data",
     amount: parseUnits("0.10", 6) + BigInt(i),
     token: USDC,
-    recipient: (`0x${(i + 1).toString(16).padStart(40, "0")}`) as Address,
+    recipient: `0x${(i + 1).toString(16).padStart(40, "0")}` as Address,
     chain: "eip155:84532",
     agentId: "a",
   };

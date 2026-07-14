@@ -55,10 +55,28 @@ export class PolicyEvaluator {
 
     const checks: PolicyCheck[] = [];
     let escalate = false;
+    let spendCapRules = 0;
+    let spendCapApplied = 0;
     for (const rule of this.policy.rules) {
+      if (rule.type === "spend-cap") spendCapRules++;
       const res = dispatch(rule, ctx);
-      if (res.check) checks.push(res.check);
+      if (res.check) {
+        checks.push(res.check);
+        if (rule.type === "spend-cap") spendCapApplied++;
+      }
       if (res.escalate) escalate = true;
+    }
+    // A policy that declares spend-cap rules but none of them target this
+    // payment's token silently gives it zero cap coverage (checkSpendCap skips
+    // a non-matching token with no check entry at all). Surface that instead of
+    // letting it pass invisibly — non-blocking (passed: true), purely visibility.
+    if (spendCapRules > 0 && spendCapApplied === 0) {
+      checks.push({
+        id: "spend-cap-coverage",
+        passed: true,
+        severity: "warning",
+        message: `no spend-cap rule targets token ${req.token} — this payment has no cap coverage`,
+      });
     }
     return { checks, escalate };
   }
@@ -70,8 +88,7 @@ export class PolicyEvaluator {
   }
 
   private windowedSpend(window: SpendWindow, token: string, now: number): bigint {
-    const cutoff =
-      window === "hour" ? now - HOUR_MS : window === "day" ? now - DAY_MS : 0; // session = all-time
+    const cutoff = window === "hour" ? now - HOUR_MS : window === "day" ? now - DAY_MS : 0; // session = all-time
     const t = token.toLowerCase();
     return this.payments
       .filter((p) => p.token === t && p.ts > cutoff)

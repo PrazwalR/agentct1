@@ -35,7 +35,6 @@ function resolveCliLLM(opts: { provider?: string; ollamaUrl?: string; model?: st
   };
 }
 
-
 const program = new Command();
 program
   .name("agentctl")
@@ -71,8 +70,7 @@ program
       llm: opts.llm ? resolveCliLLM(opts) : undefined,
     });
 
-    const token =
-      String(opts.token).toUpperCase() === "USDC" ? cfg.usdc : (opts.token as Address);
+    const token = String(opts.token).toUpperCase() === "USDC" ? cfg.usdc : (opts.token as Address);
     const req: PaymentRequest = {
       intent: opts.intent,
       amount: parseUnits(String(opts.amount), 6),
@@ -96,8 +94,9 @@ policyCmd
   .option("--provider <name>", "llm provider: anthropic or ollama (default: auto-detect from env)")
   .option("--ollama-url <url>", "ollama server URL (default http://127.0.0.1:11434)")
   .option("--model <name>", "override the provider's default model")
+  .option("--chain <caip2>", "chain spend-cap rules are denominated in", DEFAULT_CHAIN)
   .action(async (opts) => {
-    const policy = await compilePolicy(opts.text, opts.agent, resolveCliLLM(opts));
+    const policy = await compilePolicy(opts.text, opts.agent, resolveCliLLM(opts), opts.chain);
     const out: string = opts.out ?? `${opts.agent}.policy.json`;
     writeFileSync(out, policyToJSON(policy));
     console.log(`✓ wrote ${out} (${policy.rules.length} rules)`);
@@ -231,7 +230,10 @@ program
     const scenarios: Array<[string, PaymentRequest]> = [
       ["normal — pay the known weather API $0.50", mkReq("0.50", known, "weather data for trip")],
       ["large — pay the known API $15 (over $2 approval line)", mkReq("15", known, "bulk compute")],
-      ["prompt-injected — send $15 to a fresh attacker address", mkReq("15", attacker, "weather data")],
+      [
+        "prompt-injected — send $15 to a fresh attacker address",
+        mkReq("15", attacker, "weather data"),
+      ],
     ];
     for (const [label, req] of scenarios) {
       console.log(`\n── ${label} ──`);
@@ -283,27 +285,55 @@ program
   .description("Run the HTTP control plane (evaluate / approvals / breaker / report)")
   .requiredOption("--policy <file>", "policy JSON")
   .option("--port <n>", "port", "8787")
+  .option("--host <address>", "bind address", "127.0.0.1")
   .option("--token <token>", "require Authorization: Bearer <token>")
+  .option("--rate-limit-max <n>", "max requests per window per client", "60")
+  .option("--rate-limit-window-ms <ms>", "rate-limit window in ms", "60000")
+  .option("--breaker-window <seconds>", "circuit-breaker window", "3600")
+  .option("--breaker-max-blocks <n>", "freeze the agent after this many blocks in the window", "10")
+  .option(
+    "--breaker-max-anomalies <n>",
+    "freeze the agent after this many anomalies in the window",
+    "5",
+  )
   .action(async (opts) => {
+    if (!opts.token) {
+      console.warn("warning: --token not set — the control plane is unauthenticated");
+    }
     const policy = policyFromJSON(readFileSync(opts.policy, "utf8"));
     const guard = await createGuard({
       wallet: new ViemAdapter({ privateKey: generatePrivateKey() }),
       policy,
       approvalQueue: new ApprovalQueue(),
-      circuitBreaker: { windowSeconds: 3600, maxBlocks: 10, maxAnomalies: 5 },
+      circuitBreaker: {
+        windowSeconds: Number(opts.breakerWindow),
+        maxBlocks: Number(opts.breakerMaxBlocks),
+        maxAnomalies: Number(opts.breakerMaxAnomalies),
+      },
     });
     const server = await serveControlPlane(guard, {
       port: Number(opts.port),
+      host: opts.host,
       token: opts.token,
+      rateLimit: { windowMs: Number(opts.rateLimitWindowMs), max: Number(opts.rateLimitMax) },
     });
     const addr = server.address();
     const port = addr && typeof addr === "object" ? addr.port : opts.port;
-    console.log(`agentctl control plane → http://127.0.0.1:${port}`);
+    console.log(`agentctl control plane → http://${opts.host}:${port}`);
     console.log(
       "  POST /evaluate · GET /approvals · POST /approvals/:id/(approve|deny) · " +
         "GET+POST /breaker · GET /report",
     );
     if (opts.token) console.log("  (auth: Authorization: Bearer <token>)");
+
+    // Graceful shutdown: stop accepting new connections and let in-flight ones
+    // finish, rather than dropping them mid-request on SIGTERM/SIGINT.
+    const shutdown = (signal: string) => {
+      console.log(`\n${signal} received, closing control plane…`);
+      server.close(() => process.exit(0));
+    };
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
+    process.on("SIGINT", () => shutdown("SIGINT"));
   });
 
 // ─── eval (machine bridge: JSON in → JSON out) ───────────────────────────────
@@ -313,12 +343,16 @@ program
   .action(async () => {
     const { policy: policyInput, request } = JSON.parse(await readStdin());
     const agentId: string = request.agentId ?? "bridge-agent";
-    const policy = compilePolicyObject(policyInput, agentId);
+    const policy = compilePolicyObject(policyInput, agentId, undefined, request.chain);
     // request.llm may be `true` (env auto-detect — Anthropic or Ollama, whichever is
     // configured) or an explicit { provider, baseUrl, model } object, e.g. from the
     // Python bridge choosing Ollama without any API key.
     const llm: LLMConfig | undefined =
-      request.llm && typeof request.llm === "object" ? (request.llm as LLMConfig) : request.llm ? {} : undefined;
+      request.llm && typeof request.llm === "object"
+        ? (request.llm as LLMConfig)
+        : request.llm
+          ? {}
+          : undefined;
     const guard = await createGuard({
       wallet: new ViemAdapter({ privateKey: generatePrivateKey(), chain: request.chain }),
       policy,

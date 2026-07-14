@@ -41,7 +41,7 @@ interface ResolvedLLM {
 export function resolveLLMConfig(cfg: LLMConfig = {}): ResolvedLLM | undefined {
   const provider =
     cfg.provider ??
-    (cfg.apiKey ?? process.env.ANTHROPIC_API_KEY
+    ((cfg.apiKey ?? process.env.ANTHROPIC_API_KEY)
       ? "anthropic"
       : (cfg.baseUrl ?? process.env.OLLAMA_BASE_URL)
         ? "ollama"
@@ -77,7 +77,7 @@ export async function callLLM(cfg: LLMConfig, params: LLMCallParams): Promise<st
   if (!resolved) {
     throw new Error(
       "No LLM configured — set ANTHROPIC_API_KEY, or run Ollama locally " +
-        '(`ollama serve`) and set OLLAMA_BASE_URL, or pass an explicit { provider }.',
+        "(`ollama serve`) and set OLLAMA_BASE_URL, or pass an explicit { provider }.",
     );
   }
   return resolved.provider === "anthropic"
@@ -126,6 +126,7 @@ async function callOllama(cfg: ResolvedLLM, params: LLMCallParams): Promise<stri
     throw new Error(
       `Ollama not reachable at ${cfg.baseUrl} — is \`ollama serve\` running, and is ` +
         `\`${cfg.model}\` pulled (\`ollama pull ${cfg.model}\`)? (${err instanceof Error ? err.message : String(err)})`,
+      { cause: err },
     );
   }
   if (!res.ok) throw new Error(`Ollama call failed: ${res.status} ${await res.text()}`);

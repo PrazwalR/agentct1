@@ -22,8 +22,7 @@ export function toPaymentRequest(input: PaymentToolInput, agentId: string): Paym
   const cfg = getChain(chain);
   const token =
     !input.token || input.token.toUpperCase() === "USDC" ? cfg.usdc : (input.token as Address);
-  const amount =
-    typeof input.amount === "bigint" ? input.amount : usdToTokenUnits(input.amount);
+  const amount = typeof input.amount === "bigint" ? input.amount : usdToTokenUnits(input.amount);
   return {
     intent: input.intent ?? input.reason ?? "tool payment",
     amount,

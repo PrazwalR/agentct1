@@ -6,7 +6,10 @@ import { FailoverFacilitatorClient } from "../x402/facilitator.js";
 function fakeSettle(
   fn: () => Promise<{ success: boolean; transaction: string; network: string }>,
 ): HTTPFacilitatorClient {
-  return { settle: fn, verify: async () => ({ isValid: true }) } as unknown as HTTPFacilitatorClient;
+  return {
+    settle: fn,
+    verify: async () => ({ isValid: true }),
+  } as unknown as HTTPFacilitatorClient;
 }
 
 const ok = () =>

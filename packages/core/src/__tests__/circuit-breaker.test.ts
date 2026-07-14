@@ -51,7 +51,12 @@ describe("CircuitBreaker", () => {
 describe("AgentGuard circuit breaker integration", () => {
   const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e" as Address;
   const A = "0x1111111111111111111111111111111111111111" as Address;
-  const policy: Policy = { agentId: "a", anomalyThreshold: 0.8, anomalyAction: "escalate", rules: [] };
+  const policy: Policy = {
+    agentId: "a",
+    anomalyThreshold: 0.8,
+    anomalyAction: "escalate",
+    rules: [],
+  };
   const req: PaymentRequest = {
     intent: "x",
     amount: parseUnits("0.10", 6),

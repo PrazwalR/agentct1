@@ -64,7 +64,12 @@ describe("ApprovalQueue", () => {
 describe("AgentGuard approval-queue wiring", () => {
   it("exposes the configured queue as the escalation sink", async () => {
     const queue = new ApprovalQueue();
-    const policy: Policy = { agentId: "a", anomalyThreshold: 0.8, anomalyAction: "escalate", rules: [] };
+    const policy: Policy = {
+      agentId: "a",
+      anomalyThreshold: 0.8,
+      anomalyAction: "escalate",
+      rules: [],
+    };
     const guard = await createGuard({
       wallet: new ViemAdapter({ privateKey: generatePrivateKey() }),
       policy,

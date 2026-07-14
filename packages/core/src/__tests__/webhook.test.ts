@@ -56,7 +56,10 @@ describe("webhook escalation", () => {
   });
 
   it("approves when the endpoint returns { approved: true } with a valid signature", async () => {
-    const { server, url, last } = await startServer(() => ({ status: 200, json: { approved: true } }));
+    const { server, url, last } = await startServer(() => ({
+      status: 200,
+      json: { approved: true },
+    }));
     const onEscalation = createWebhookEscalation({ url, secret: "sec", timeoutSeconds: 5 });
 
     expect(await onEscalation(req, decision)).toBe(true);

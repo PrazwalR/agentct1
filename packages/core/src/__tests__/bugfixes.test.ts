@@ -55,9 +55,9 @@ describe("aggregateVerdict", () => {
   });
 
   it("escalates on policyEscalate and allows when nothing fires", () => {
-    expect(aggregateVerdict([], 0, { ...base, anomalyAction: "escalate", policyEscalate: true })).toBe(
-      "escalate",
-    );
+    expect(
+      aggregateVerdict([], 0, { ...base, anomalyAction: "escalate", policyEscalate: true }),
+    ).toBe("escalate");
     expect(aggregateVerdict([], 0, { ...base, anomalyAction: "escalate" })).toBe("allow");
   });
 });

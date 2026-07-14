@@ -26,7 +26,8 @@ export class IntentReconciler {
   private readonly minAmount: bigint;
 
   constructor(apiKeyOrConfig?: string | LLMConfig, opts: IntentReconcilerOptions = {}) {
-    const base: LLMConfig = typeof apiKeyOrConfig === "string" ? { apiKey: apiKeyOrConfig } : (apiKeyOrConfig ?? {});
+    const base: LLMConfig =
+      typeof apiKeyOrConfig === "string" ? { apiKey: apiKeyOrConfig } : (apiKeyOrConfig ?? {});
     this.llmConfig = {
       ...base,
       provider: opts.provider ?? base.provider,

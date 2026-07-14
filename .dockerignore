@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+**/dist
+**/target
+**/*.sqlite
+**/*.sqlite-*
+.git
+.env
+.env.*
+!.env.example
+contracts/out
+contracts/cache
+contracts/broadcast
+contracts/lib
+*.log

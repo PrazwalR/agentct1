@@ -7,15 +7,24 @@ import {
 } from "node:http";
 import { type AgentGuard, type PaymentRequest, report } from "@agentctl/core";
 
+export interface RateLimitOptions {
+  windowMs: number;
+  max: number;
+}
+
 export interface ControlPlaneOptions {
-  /** If set, every request must send `Authorization: Bearer <token>`. */
+  /** If set, every route except /health requires `Authorization: Bearer <token>`. */
   token?: string;
+  /** Per-client-IP rate limit (default 60 requests / 60s). Pass `false` to disable. */
+  rateLimit?: RateLimitOptions | false;
 }
 
 export interface ServeOptions extends ControlPlaneOptions {
   port?: number;
   host?: string;
 }
+
+const DEFAULT_RATE_LIMIT: RateLimitOptions = { windowMs: 60_000, max: 60 };
 
 function bigintReplacer(_key: string, value: unknown): unknown {
   return typeof value === "bigint" ? value.toString() : value;
@@ -33,13 +42,31 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   return raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 }
 
+/** Fixed-window per-key request counter (in-process; fine for a single control-plane instance). */
+class RateLimiter {
+  private readonly hits = new Map<string, { count: number; resetAt: number }>();
+
+  constructor(private readonly opts: RateLimitOptions) {}
+
+  allow(key: string, now = Date.now()): boolean {
+    const entry = this.hits.get(key);
+    if (!entry || now >= entry.resetAt) {
+      this.hits.set(key, { count: 1, resetAt: now + this.opts.windowMs });
+      return true;
+    }
+    if (entry.count >= this.opts.max) return false;
+    entry.count++;
+    return true;
+  }
+}
+
 /**
  * A Node http request handler exposing a guard's control surface. Turns the
  * in-process approval queue + circuit breaker into a remotely-drivable control
  * plane so an operator UI / CLI can list and resolve escalations, check/reset the
  * breaker, dry-run policy, and pull analytics.
  *
- *   GET  /health
+ *   GET  /health                         (always open — no auth, no rate limit)
  *   POST /evaluate                     { request: {...} } -> { decision }
  *   GET  /approvals                    -> { pending: [...] }
  *   POST /approvals/:id/approve|deny   -> { resolved }
@@ -51,8 +78,10 @@ export function createControlPlaneHandler(
   guard: AgentGuard,
   opts: ControlPlaneOptions = {},
 ): RequestListener {
+  const limiter =
+    opts.rateLimit === false ? undefined : new RateLimiter(opts.rateLimit ?? DEFAULT_RATE_LIMIT);
   return (req, res) => {
-    void handle(guard, opts, req, res).catch((err) =>
+    void handle(guard, opts, limiter, req, res).catch((err) =>
       send(res, 400, { error: err instanceof Error ? err.message : String(err) }),
     );
   };
@@ -61,18 +90,25 @@ export function createControlPlaneHandler(
 async function handle(
   guard: AgentGuard,
   opts: ControlPlaneOptions,
+  limiter: RateLimiter | undefined,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
-  if (opts.token && req.headers.authorization !== `Bearer ${opts.token}`) {
-    return send(res, 401, { error: "unauthorized" });
-  }
-
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
   const method = req.method ?? "GET";
 
+  // Unauthenticated and unlimited so orchestrator liveness probes (which
+  // typically can't send custom headers) and health monitoring always work.
   if (method === "GET" && path === "/health") return send(res, 200, { status: "ok" });
+
+  if (limiter && !limiter.allow(req.socket.remoteAddress ?? "unknown")) {
+    return send(res, 429, { error: "rate limit exceeded" });
+  }
+
+  if (opts.token && req.headers.authorization !== `Bearer ${opts.token}`) {
+    return send(res, 401, { error: "unauthorized" });
+  }
 
   if (method === "POST" && path === "/evaluate") {
     const body = await readJson(req);

@@ -3,8 +3,10 @@
 
 use alloy_primitives::U256;
 use axum::{
-    extract::DefaultBodyLimit,
-    http::StatusCode,
+    extract::{DefaultBodyLimit, Request, State},
+    http::{header, StatusCode},
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
@@ -13,14 +15,41 @@ use serde::{Deserialize, Serialize};
 use crate::behavioral::IsolationForest;
 use crate::sig_inspect::{self, Eip3009Auth, Eip712Domain, Permit2Auth};
 
-pub fn app() -> Router {
-    Router::new()
-        .route("/health", get(health))
+/// Build the router. `token`, if set, gates every route except `/health` (which
+/// stays open so orchestrator liveness probes — which typically can't send
+/// custom headers — keep working) behind `Authorization: Bearer <token>`.
+pub fn app(token: Option<String>) -> Router {
+    let protected = Router::new()
         .route("/score", post(score))
         .route("/inspect/eip3009", post(inspect_eip3009))
         .route("/inspect/permit2", post(inspect_permit2))
+        .route_layer(middleware::from_fn_with_state(token, require_bearer_token));
+
+    Router::new()
+        .route("/health", get(health))
+        .merge(protected)
         // Cap request bodies (defense against a /score vector flood).
         .layer(DefaultBodyLimit::max(1024 * 1024))
+}
+
+async fn require_bearer_token(
+    State(token): State<Option<String>>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let Some(expected) = token else {
+        return Ok(next.run(req).await);
+    };
+    let got = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if got == format!("Bearer {expected}") {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
 }
 
 async fn health() -> &'static str {
@@ -39,6 +68,10 @@ struct ScoreRequest {
     sample_size: usize,
     #[serde(default = "default_seed")]
     seed: u32,
+    /// Forest score above which `anomaly` is true (default 0.7 — matches the TS
+    /// scorer's default `forestWarnThreshold`; override per caller if tuned).
+    #[serde(default = "default_anomaly_threshold")]
+    anomaly_threshold: f64,
 }
 fn default_trees() -> usize {
     100
@@ -48,6 +81,9 @@ fn default_sample() -> usize {
 }
 fn default_seed() -> u32 {
     1337
+}
+fn default_anomaly_threshold() -> f64 {
+    0.7
 }
 
 #[derive(Serialize)]
@@ -59,7 +95,7 @@ struct ScoreResponse {
 async fn score(Json(req): Json<ScoreRequest>) -> Json<ScoreResponse> {
     let forest = IsolationForest::fit(&req.vectors, req.trees, req.sample_size, req.seed);
     let score = forest.anomaly_score(&req.point);
-    Json(ScoreResponse { score, anomaly: score > 0.7 })
+    Json(ScoreResponse { score, anomaly: score > req.anomaly_threshold })
 }
 
 // ─── signature inspection ────────────────────────────────────────────────────

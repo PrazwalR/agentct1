@@ -47,9 +47,7 @@ export function createRemoteSignerAccount(
       return signTypedData(params as TypedDataDefinition);
     },
     async signMessage(): Promise<Hex> {
-      throw new Error(
-        "remote signer supports only signTypedData (used by EIP-3009 / Permit2)",
-      );
+      throw new Error("remote signer supports only signTypedData (used by EIP-3009 / Permit2)");
     },
     async signTransaction(): Promise<Hex> {
       throw new Error("remote signer does not sign raw transactions");

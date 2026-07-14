@@ -69,10 +69,13 @@ describe("policy evaluator", () => {
 
   it("enforced allowlist blocks a non-listed recipient", async () => {
     const ev = new PolicyEvaluator(
-      policy([{ type: "allowlist", mode: "recipients", entries: [A.toLowerCase()], enforce: true }]),
+      policy([
+        { type: "allowlist", mode: "recipients", entries: [A.toLowerCase()], enforce: true },
+      ]),
     );
     expect(
-      (await ev.evaluate(req("1", B))).checks.find((c) => c.id === "allowlist-recipients")?.severity,
+      (await ev.evaluate(req("1", B))).checks.find((c) => c.id === "allowlist-recipients")
+        ?.severity,
     ).toBe("critical");
     expect(
       (await ev.evaluate(req("1", A))).checks.find((c) => c.id === "allowlist-recipients")?.passed,
@@ -85,9 +88,9 @@ describe("policy evaluator", () => {
     );
     ev.observe(req("1", A));
     ev.observe(req("1", A));
-    expect(
-      (await ev.evaluate(req("1", A))).checks.find((c) => c.id === "rate-limit")?.passed,
-    ).toBe(false);
+    expect((await ev.evaluate(req("1", A))).checks.find((c) => c.id === "rate-limit")?.passed).toBe(
+      false,
+    );
   });
 });
 

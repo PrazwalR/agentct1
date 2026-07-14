@@ -74,9 +74,7 @@ export interface InspectedPermit2 {
 }
 
 /** Decode what a signed Permit2 authorization actually authorizes. */
-export function inspectPermit2Authorization(
-  signed: SignedPermit2Authorization,
-): InspectedPermit2 {
+export function inspectPermit2Authorization(signed: SignedPermit2Authorization): InspectedPermit2 {
   return {
     token: signed.permit.permitted.token,
     recipient: signed.permit.witness.to,

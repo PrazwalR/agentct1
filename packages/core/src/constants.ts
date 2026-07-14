@@ -56,9 +56,7 @@ export const CHAINS: Record<string, ChainConfig> = {
 export function getChain(caip2: string): ChainConfig {
   const c = CHAINS[caip2];
   if (!c) {
-    throw new Error(
-      `Unsupported chain "${caip2}". Supported: ${Object.keys(CHAINS).join(", ")}`,
-    );
+    throw new Error(`Unsupported chain "${caip2}". Supported: ${Object.keys(CHAINS).join(", ")}`);
   }
   return c;
 }

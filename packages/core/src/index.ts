@@ -28,10 +28,7 @@ import {
   intentStore,
   requirementsToPaymentRequest,
 } from "./x402/interceptor.js";
-import {
-  type WebhookEscalationOptions,
-  createWebhookEscalation,
-} from "./escalation/webhook.js";
+import { type WebhookEscalationOptions, createWebhookEscalation } from "./escalation/webhook.js";
 import { decisionAttrs, paymentAttrs, withSpan } from "./tracing.js";
 import { type ClientSvmSigner, registerSvmScheme } from "./x402/svm.js";
 import { SOLANA_MAINNET_CAIP2 } from "./solana.js";
@@ -43,7 +40,7 @@ export interface GuardConfig {
   /** Wallet adapter used for signing + execution. */
   wallet: IWalletAdapter;
   /** Policy — structured, or natural-language to be compiled. */
-  policy: Policy | { naturalLanguage: string; agentId: string };
+  policy: Policy | { naturalLanguage: string; agentId: string; chain?: string };
   /** Anthropic API key for NL policy compilation + intent checks. Shortcut for `llm: { apiKey }`. */
   llmApiKey?: string;
   /** LLM config for NL policy compilation + intent checks — pass { provider: "ollama" } for a
@@ -132,6 +129,7 @@ export class AgentGuard {
             config.policy.naturalLanguage,
             config.policy.agentId,
             resolveGuardLLMConfig(config),
+            config.policy.chain ?? config.wallet.chain,
           )
         : config.policy;
     return new AgentGuard(policy, config);
@@ -186,8 +184,7 @@ export class AgentGuard {
         return decision;
       }
 
-      const { checks: policyChecks, escalate: policyEscalate } =
-        await this.evaluator.evaluate(req);
+      const { checks: policyChecks, escalate: policyEscalate } = await this.evaluator.evaluate(req);
       const { score, anomalyChecks } = await this.behavioral.score(req);
       const intentCheck = await this.intent.check(req);
       const checks: PolicyCheck[] = [...policyChecks, ...anomalyChecks, intentCheck];

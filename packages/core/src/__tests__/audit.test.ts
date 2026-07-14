@@ -5,8 +5,7 @@ import { MerkleAuditBatch } from "../audit/merkle.js";
 import type { AuditEntry, PaymentRequest, PolicyDecision } from "../types.js";
 
 const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e" as Address;
-const addr = (i: number): Address =>
-  (`0x${(i + 1).toString(16).padStart(40, "0")}`) as Address;
+const addr = (i: number): Address => `0x${(i + 1).toString(16).padStart(40, "0")}` as Address;
 
 function mkReq(i: number): PaymentRequest {
   return {

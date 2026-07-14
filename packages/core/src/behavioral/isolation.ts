@@ -17,10 +17,24 @@ export interface BehavioralOptions {
   forestTrees?: number;
   forestSampleSize?: number;
   forestSeed?: number;
+  /** EWMA reactivity (default 0.1 — see EWMABaseline). */
+  ewmaAlpha?: number;
+  /** |z-score| above which an amount/interval deviation is flagged (default 3). */
+  zWarnThreshold?: number;
+  /** |z-score| above which an amount deviation is critical, not just a warning (default 5). */
+  zCriticalThreshold?: number;
+  /** Forest anomaly score above which a multivariate check fires (default 0.7). */
+  forestWarnThreshold?: number;
+  /** Forest anomaly score above which that check is critical, not a warning (default 0.85). */
+  forestCriticalThreshold?: number;
 }
 
 const DEFAULT_MIN = 1000;
 const DEFAULT_INTERVAL = 500;
+const DEFAULT_Z_WARN = 3;
+const DEFAULT_Z_CRITICAL = 5;
+const DEFAULT_FOREST_WARN = 0.7;
+const DEFAULT_FOREST_CRITICAL = 0.85;
 
 /**
  * Behavioral anomaly detection for agent spending.
@@ -36,14 +50,16 @@ const DEFAULT_INTERVAL = 500;
  * Deliberately NOT an LLM — runs inline on every payment in single-digit ms.
  */
 export class BehavioralScorer {
-  private readonly baseline = new EWMABaseline();
+  private readonly baseline: EWMABaseline;
   private observationCount = 0;
   private forest?: IsolationForest;
 
   constructor(
     private readonly agentId: string,
     private readonly opts: BehavioralOptions = {},
-  ) {}
+  ) {
+    this.baseline = new EWMABaseline(opts.ewmaAlpha);
+  }
 
   private get minObservations(): number {
     return this.opts.forestMinObservations ?? DEFAULT_MIN;
@@ -52,19 +68,23 @@ export class BehavioralScorer {
   async score(req: PaymentRequest): Promise<BehavioralResult> {
     const f = extractFeatures(req, this.baseline);
     const checks: PolicyCheck[] = [];
+    const zWarn = this.opts.zWarnThreshold ?? DEFAULT_Z_WARN;
+    const zCritical = this.opts.zCriticalThreshold ?? DEFAULT_Z_CRITICAL;
+    const forestWarn = this.opts.forestWarnThreshold ?? DEFAULT_FOREST_WARN;
+    const forestCritical = this.opts.forestCriticalThreshold ?? DEFAULT_FOREST_CRITICAL;
 
     const amountZ = this.baseline.zScore("amount", f.amount);
     const intervalZ = this.baseline.zScore("interval", f.secondsSinceLast);
 
-    if (Math.abs(amountZ) > 3) {
+    if (Math.abs(amountZ) > zWarn) {
       checks.push({
         id: "behavioral-amount-spike",
         passed: false,
-        severity: Math.abs(amountZ) > 5 ? "critical" : "warning",
+        severity: Math.abs(amountZ) > zCritical ? "critical" : "warning",
         message: `payment amount is ${amountZ.toFixed(1)}σ from this agent's norm`,
       });
     }
-    if (intervalZ < -3) {
+    if (intervalZ < -zWarn) {
       checks.push({
         id: "behavioral-frequency-spike",
         passed: false,
@@ -84,11 +104,11 @@ export class BehavioralScorer {
     let forestScore = 0;
     if (this.forest && this.observationCount >= this.minObservations) {
       forestScore = this.forest.anomalyScore(f.vector);
-      if (forestScore > 0.7) {
+      if (forestScore > forestWarn) {
         checks.push({
           id: "behavioral-multivariate-anomaly",
           passed: false,
-          severity: forestScore > 0.85 ? "critical" : "warning",
+          severity: forestScore > forestCritical ? "critical" : "warning",
           message: `multivariate anomaly score ${forestScore.toFixed(2)} — unusual combination of amount, timing, and counterparty`,
         });
       }

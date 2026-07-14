@@ -5,7 +5,7 @@ import type {
   SignedAuthorization,
   SignedPermit2Authorization,
 } from "../types.js";
-import { signEIP3009Authorization } from "../x402/eip3009.js";
+import { InFlightNonceTracker, signEIP3009Authorization } from "../x402/eip3009.js";
 import { signPermit2Authorization } from "../x402/permit2.js";
 import { erc20Balance, makePublicClient } from "./base.js";
 import { createRemoteSignerAccount, eip712ToJson } from "./remote-signer.js";
@@ -34,6 +34,7 @@ export class PrivyAdapter implements IWalletAdapter {
   readonly provider = "privy";
   readonly chain: string;
   private signer?: LocalAccount;
+  private readonly nonces = new InFlightNonceTracker();
 
   constructor(private readonly cfg: PrivyAdapterConfig) {
     this.chain = cfg.chain ?? "eip155:84532";
@@ -41,11 +42,13 @@ export class PrivyAdapter implements IWalletAdapter {
 
   private async ensureSigner(): Promise<LocalAccount> {
     if (this.signer) return this.signer;
+    const appId = this.cfg.appId ?? process.env.PRIVY_APP_ID;
+    const appSecret = this.cfg.appSecret ?? process.env.PRIVY_APP_SECRET;
+    if (!appId) throw new Error("PrivyAdapter: PRIVY_APP_ID not set (config.appId or env)");
+    if (!appSecret)
+      throw new Error("PrivyAdapter: PRIVY_APP_SECRET not set (config.appSecret or env)");
     const { PrivyClient } = await import("@privy-io/server-auth");
-    const privy = new PrivyClient(
-      this.cfg.appId ?? process.env.PRIVY_APP_ID ?? "",
-      this.cfg.appSecret ?? process.env.PRIVY_APP_SECRET ?? "",
-    );
+    const privy = new PrivyClient(appId, appSecret);
     this.signer = createRemoteSignerAccount(this.cfg.address, async (params) => {
       const res = await privy.walletApi.ethereum.signTypedData({
         walletId: this.cfg.walletId,
@@ -72,10 +75,15 @@ export class PrivyAdapter implements IWalletAdapter {
   }
 
   async authorizePayment(req: PaymentRequest): Promise<SignedAuthorization> {
-    return signEIP3009Authorization(req, await this.ensureSigner());
+    return signEIP3009Authorization(req, await this.ensureSigner(), { tracker: this.nonces });
   }
 
   async authorizePaymentPermit2(req: PaymentRequest): Promise<SignedPermit2Authorization> {
     return signPermit2Authorization(req, await this.ensureSigner());
+  }
+
+  /** Release an EIP-3009 nonce once its authorization has settled or expired. */
+  releaseNonce(nonce: Hex): void {
+    this.nonces.release(nonce);
   }
 }

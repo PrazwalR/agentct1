@@ -47,7 +47,7 @@ export interface EntryProof {
 
 function makeStore(store: string): AuditStore {
   if (store.startsWith("postgres")) return new PostgresAuditStore(store);
-  const path = store === "sqlite" ? process.env.AUDIT_DB_PATH ?? "./agentctl.sqlite" : store;
+  const path = store === "sqlite" ? (process.env.AUDIT_DB_PATH ?? "./agentctl.sqlite") : store;
   return new SqliteAuditStore(path);
 }
 

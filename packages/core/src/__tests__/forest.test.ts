@@ -5,7 +5,7 @@ import { BehavioralScorer } from "../behavioral/isolation.js";
 import type { PaymentRequest } from "../types.js";
 
 const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e" as Address;
-const known = (i: number): Address => (`0x${(i + 1).toString(16).padStart(40, "0")}`) as Address;
+const known = (i: number): Address => `0x${(i + 1).toString(16).padStart(40, "0")}` as Address;
 const FRESH = "0x00000000000000000000000000000000deAddEad" as Address;
 
 function req(amount: bigint, recipient: Address): PaymentRequest {
@@ -16,7 +16,12 @@ describe("isolation forest", () => {
   it("scores an out-of-distribution point higher than an inlier (deterministic)", () => {
     const data: number[][] = [];
     for (let i = 0; i < 200; i++) {
-      data.push([80000 + ((i * 137) % 40000), 1 + ((i * 7) % 60), (i * 5) % 24, i % 6 === 0 ? 1 : 0]);
+      data.push([
+        80000 + ((i * 137) % 40000),
+        1 + ((i * 7) % 60),
+        (i * 5) % 24,
+        i % 6 === 0 ? 1 : 0,
+      ]);
     }
     const forest = new IsolationForest(data, { trees: 120, sampleSize: 128, seed: 42 });
     const inlier = forest.anomalyScore([100000, 30, 12, 0]);
