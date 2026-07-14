@@ -16,8 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 11
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -45,6 +43,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: foundry-rs/foundry-toolchain@v1
+      # contracts/lib is gitignored (forge-std isn't a submodule here — see
+      # contracts/ setup notes); fetch it fresh rather than assume it's present.
+      - run: git clone --depth 1 https://github.com/foundry-rs/forge-std contracts/lib/forge-std
       - run: forge test --root contracts -vvv
 
   python:
@@ -54,8 +55,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 11
       - uses: actions/setup-node@v4
         with:
           node-version: 22
