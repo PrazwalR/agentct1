@@ -184,6 +184,27 @@ export class AgentGuard {
         return decision;
       }
 
+      // Reject non-positive amounts at the boundary rather than letting them reach
+      // signing (where they fail cryptically): a negative amount is below every
+      // spend cap and would otherwise aggregate to "allow". Fail closed, auditable.
+      if (req.amount <= 0n) {
+        const decision: PolicyDecision = {
+          verdict: "block",
+          riskScore: 1,
+          checks: [
+            {
+              id: "invalid-amount",
+              passed: false,
+              severity: "critical",
+              message: `payment amount must be positive (got ${req.amount})`,
+            },
+          ],
+          reason: `Blocked: payment amount must be positive (got ${req.amount})`,
+        };
+        span.setAttributes(decisionAttrs(decision));
+        return decision;
+      }
+
       const { checks: policyChecks, escalate: policyEscalate } = await this.evaluator.evaluate(req);
       const { score, anomalyChecks } = await this.behavioral.score(req);
       const intentCheck = await this.intent.check(req);

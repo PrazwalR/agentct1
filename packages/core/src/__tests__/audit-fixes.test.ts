@@ -8,6 +8,7 @@ import { ViemAdapter } from "../adapters/viem.js";
 import { CdpAdapter } from "../adapters/cdp.js";
 import { CircleAdapter } from "../adapters/circle.js";
 import { PrivyAdapter } from "../adapters/privy.js";
+import { createGuard } from "../index.js";
 import type { IWalletAdapter, PaymentRequest, Policy } from "../types.js";
 
 const A = "0x1111111111111111111111111111111111111111" as Address;
@@ -93,6 +94,56 @@ describe("Circle/Privy adapters — fail fast on missing credentials", () => {
   it("PrivyAdapter throws a clear error instead of silently using an empty-string secret", async () => {
     const adapter = new PrivyAdapter({ walletId: "w1", address: A });
     await expect(adapter.getSigner()).rejects.toThrow(/PRIVY_APP_ID/);
+  });
+});
+
+describe("AgentGuard — non-positive amounts are rejected at the boundary", () => {
+  const USDC = getChain("eip155:84532").usdc;
+  const openPolicy: Policy = {
+    agentId: "a",
+    anomalyThreshold: 0.99,
+    anomalyAction: "escalate",
+    rules: [], // no rules at all — a bare amount would otherwise sail through as "allow"
+  };
+  function req(amount: bigint): PaymentRequest {
+    return {
+      intent: "x",
+      amount,
+      token: USDC,
+      recipient: A,
+      chain: "eip155:84532",
+      agentId: "a",
+    };
+  }
+
+  it("blocks a zero amount with an invalid-amount check", async () => {
+    const guard = await createGuard({
+      wallet: new ViemAdapter({ privateKey: generatePrivateKey() }),
+      policy: openPolicy,
+    });
+    const d = await guard.evaluate(req(0n));
+    expect(d.verdict).toBe("block");
+    expect(d.checks.some((c) => c.id === "invalid-amount" && !c.passed)).toBe(true);
+  });
+
+  it("blocks a negative amount (which is below every spend cap) instead of allowing it", async () => {
+    const guard = await createGuard({
+      wallet: new ViemAdapter({ privateKey: generatePrivateKey() }),
+      policy: openPolicy,
+    });
+    const d = await guard.evaluate(req(-100n));
+    expect(d.verdict).toBe("block");
+    expect(d.checks.some((c) => c.id === "invalid-amount")).toBe(true);
+  });
+
+  it("still evaluates a normal positive amount (control)", async () => {
+    const guard = await createGuard({
+      wallet: new ViemAdapter({ privateKey: generatePrivateKey() }),
+      policy: openPolicy,
+    });
+    const d = await guard.evaluate(req(parseUnits("1", 6)));
+    expect(d.verdict).toBe("allow");
+    expect(d.checks.some((c) => c.id === "invalid-amount")).toBe(false);
   });
 });
 
