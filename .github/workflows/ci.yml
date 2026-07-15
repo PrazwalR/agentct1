@@ -21,8 +21,12 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -r typecheck
+      # Build first: @agentctl/server and @agentctl/cli import @agentctl/core, whose
+      # package.json resolves types/main to ./dist. In a clean checkout that dir doesn't
+      # exist until build runs, so typecheck must come after. pnpm -r build respects
+      # workspace topological order (core before server/cli).
       - run: pnpm -r build
+      - run: pnpm -r typecheck
       - run: pnpm -r test
 
   rust:
