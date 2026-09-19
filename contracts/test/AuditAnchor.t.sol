@@ -168,7 +168,196 @@ contract AuditAnchorTest is Test {
         assertFalse(anchor.verifyEntry(thief, 0, "a", 1, address(1), 0, R1, empty));
     }
 
+    // ─── events ─────────────────────────────────────────────────────────────
+
+    event BatchCommitted(
+        address indexed operator,
+        uint256 indexed batchIndex,
+        bytes32 merkleRoot,
+        bytes32 prevRoot,
+        uint64 entryCount,
+        uint64 timestamp
+    );
+
+    function testEmitsBatchCommittedWithTheChainLink() public {
+        // The client reads batchIndex off this event rather than inferring it from a
+        // separate getBatchCount() read, so every field here is load-bearing.
+        vm.expectEmit(true, true, true, true);
+        emit BatchCommitted(address(this), 0, R1, ZERO, 3, uint64(block.timestamp));
+        anchor.commitBatch(ZERO, R1, 3);
+
+        vm.expectEmit(true, true, true, true);
+        emit BatchCommitted(address(this), 1, R2, R1, 7, uint64(block.timestamp));
+        anchor.commitBatch(R1, R2, 7);
+    }
+
+    function testEmitsUnderTheCallingOperatorNotTheDeployer() public {
+        address op = address(0xA11CE);
+        vm.expectEmit(true, true, true, true);
+        emit BatchCommitted(op, 0, R1, ZERO, 1, uint64(block.timestamp));
+        vm.prank(op);
+        anchor.commitBatch(ZERO, R1, 1);
+    }
+
+    // ─── storage packing (Batch was packed to two slots) ────────────────────
+
+    function testFuzzBatchFieldsRoundTripThroughPackedStorage(uint64 count, uint64 warpTo) public {
+        count = uint64(bound(count, 1, type(uint64).max));
+        warpTo = uint64(bound(warpTo, 1, type(uint64).max));
+        vm.warp(warpTo);
+
+        anchor.commitBatch(ZERO, R1, count);
+        (bool found, bytes32 root, uint64 ts, uint64 storedCount) = anchor.getBatch(address(this), 0);
+
+        assertTrue(found);
+        assertEq(root, R1);
+        assertEq(storedCount, count, "entryCount truncated by packing");
+        assertEq(ts, warpTo, "timestamp truncated by packing");
+    }
+
     // ─── fuzz ───────────────────────────────────────────────────────────────
+
+    /** Any change to any field must produce a different leaf — no field is ignored. */
+    function testFuzzLeafHashIsInjectiveOverEveryField(
+        address operator,
+        uint256 timestamp,
+        address recipient,
+        uint8 verdict,
+        bytes32 entryHash
+    ) public view {
+        vm.assume(operator != address(0) && recipient != address(0));
+        timestamp = bound(timestamp, 0, type(uint64).max);
+        verdict = uint8(bound(verdict, 0, 2));
+
+        bytes32 base = anchor.leafHash(operator, "a", timestamp, recipient, verdict, entryHash);
+
+        assertTrue(base != anchor.leafHash(address(uint160(operator) ^ 1), "a", timestamp, recipient, verdict, entryHash));
+        assertTrue(base != anchor.leafHash(operator, "b", timestamp, recipient, verdict, entryHash));
+        assertTrue(base != anchor.leafHash(operator, "a", timestamp ^ 1, recipient, verdict, entryHash));
+        assertTrue(base != anchor.leafHash(operator, "a", timestamp, address(uint160(recipient) ^ 1), verdict, entryHash));
+        assertTrue(base != anchor.leafHash(operator, "a", timestamp, recipient, verdict ^ 1, entryHash));
+        assertTrue(base != anchor.leafHash(operator, "a", timestamp, recipient, verdict, entryHash ^ bytes32(uint256(1))));
+    }
+
+    /** A genuine entry verifies; the same entry with any one field altered does not. */
+    function testFuzzVerifyRejectsAnyTamperedField(
+        uint256 timestamp,
+        address recipient,
+        uint8 verdict,
+        bytes32 entryHash
+    ) public {
+        vm.assume(recipient != address(0));
+        timestamp = bound(timestamp, 1, type(uint64).max);
+        verdict = uint8(bound(verdict, 0, 2));
+
+        bytes32 leaf = anchor.leafHash(address(this), "agent", timestamp, recipient, verdict, entryHash);
+        anchor.commitBatch(ZERO, leaf, 1);
+        bytes32[] memory empty = new bytes32[](0);
+        address op = address(this);
+
+        assertTrue(anchor.verifyEntry(op, 0, "agent", timestamp, recipient, verdict, entryHash, empty));
+        assertFalse(anchor.verifyEntry(op, 0, "other", timestamp, recipient, verdict, entryHash, empty));
+        assertFalse(anchor.verifyEntry(op, 0, "agent", timestamp ^ 1, recipient, verdict, entryHash, empty));
+        assertFalse(anchor.verifyEntry(op, 0, "agent", timestamp, address(uint160(recipient) ^ 1), verdict, entryHash, empty));
+        assertFalse(anchor.verifyEntry(op, 0, "agent", timestamp, recipient, verdict ^ 1, entryHash, empty));
+        assertFalse(anchor.verifyEntry(op, 0, "agent", timestamp, recipient, verdict, entryHash ^ bytes32(uint256(1)), empty));
+    }
+
+    /**
+     * Every leaf in a multi-level tree verifies against the committed root, at any size.
+     * The single-leaf tests exercise none of the proof walk; this does.
+     */
+    function testFuzzEveryLeafInATreeVerifies(uint8 sizeSeed, bytes32 salt) public {
+        uint256 n = bound(sizeSeed, 2, 24);
+        bytes32[] memory leaves = new bytes32[](n);
+        for (uint256 i = 0; i < n; i++) {
+            leaves[i] = anchor.leafHash(
+                address(this), "agent", i + 1, address(uint160(i + 1)), uint8(i % 3),
+                keccak256(abi.encode(salt, i))
+            );
+        }
+        (bytes32 root, bytes32[][] memory levels) = _buildTree(leaves);
+        anchor.commitBatch(ZERO, root, uint64(n));
+
+        for (uint256 i = 0; i < n; i++) {
+            assertTrue(
+                anchor.verifyEntry(
+                    address(this), 0, "agent", i + 1, address(uint160(i + 1)), uint8(i % 3),
+                    keccak256(abi.encode(salt, i)), _proof(levels, i)
+                ),
+                "a genuine leaf failed to verify"
+            );
+        }
+    }
+
+    /** A proof belonging to one leaf must not validate a different leaf. */
+    function testFuzzAProofDoesNotTransferBetweenLeaves(uint8 sizeSeed, bytes32 salt) public {
+        uint256 n = bound(sizeSeed, 4, 16);
+        bytes32[] memory leaves = new bytes32[](n);
+        for (uint256 i = 0; i < n; i++) {
+            leaves[i] = anchor.leafHash(
+                address(this), "agent", i + 1, address(uint160(i + 1)), 0, keccak256(abi.encode(salt, i))
+            );
+        }
+        (bytes32 root, bytes32[][] memory levels) = _buildTree(leaves);
+        anchor.commitBatch(ZERO, root, uint64(n));
+
+        // leaf 0's proof, presented for leaf 1's data
+        assertFalse(
+            anchor.verifyEntry(
+                address(this), 0, "agent", 2, address(uint160(2)), 0,
+                keccak256(abi.encode(salt, uint256(1))), _proof(levels, 0)
+            ),
+            "a proof verified a leaf it does not belong to"
+        );
+    }
+
+    // ─── tree helpers (sorted-pair, promote-odd — matches the contract's walk) ──
+
+    function _buildTree(bytes32[] memory leaves)
+        internal
+        pure
+        returns (bytes32 root, bytes32[][] memory levels)
+    {
+        bytes32[][] memory acc = new bytes32[][](32);
+        uint256 depth = 0;
+        acc[depth] = leaves;
+        while (acc[depth].length > 1) {
+            bytes32[] memory cur = acc[depth];
+            bytes32[] memory next = new bytes32[]((cur.length + 1) / 2);
+            for (uint256 i = 0; i < cur.length; i += 2) {
+                next[i / 2] = i + 1 < cur.length ? _hashPair(cur[i], cur[i + 1]) : cur[i];
+            }
+            depth++;
+            acc[depth] = next;
+        }
+        levels = new bytes32[][](depth + 1);
+        for (uint256 i = 0; i <= depth; i++) levels[i] = acc[i];
+        root = acc[depth][0];
+    }
+
+    function _proof(bytes32[][] memory levels, uint256 index)
+        internal
+        pure
+        returns (bytes32[] memory)
+    {
+        bytes32[] memory tmp = new bytes32[](levels.length);
+        uint256 count = 0;
+        uint256 idx = index;
+        for (uint256 l = 0; l + 1 < levels.length; l++) {
+            uint256 sib = idx % 2 == 0 ? idx + 1 : idx - 1;
+            if (sib < levels[l].length) tmp[count++] = levels[l][sib];
+            idx /= 2;
+        }
+        bytes32[] memory out = new bytes32[](count);
+        for (uint256 i = 0; i < count; i++) out[i] = tmp[i];
+        return out;
+    }
+
+    function _hashPair(bytes32 a, bytes32 b) internal pure returns (bytes32) {
+        return a < b ? keccak256(abi.encodePacked(a, b)) : keccak256(abi.encodePacked(b, a));
+    }
+
 
     function testFuzzChainIsAlwaysLinear(bytes32 a, bytes32 b) public {
         vm.assume(a != bytes32(0) && b != bytes32(0));

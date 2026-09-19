@@ -9,5 +9,18 @@ evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
 
+[fuzz]
+# The contract moves no value but its proof walk and validation are pure math —
+# 256 runs is not enough coverage for the leaf/proof properties.
+runs = 1000
+max_test_rejects = 200000
+
+[invariant]
+runs = 256
+depth = 40
+# Handler actions swallow expected reverts, so any revert reaching the runner is a
+# genuine failure rather than a rejected input.
+fail_on_revert = true
+
 [rpc_endpoints]
 base_sepolia = "${RPC_BASE_SEPOLIA}"

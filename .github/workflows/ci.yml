@@ -51,6 +51,22 @@ jobs:
       # contracts/ setup notes); fetch it fresh rather than assume it's present.
       - run: git clone --depth 1 https://github.com/foundry-rs/forge-std contracts/lib/forge-std
       - run: forge test --root contracts -vvv
+      # Fail the build on an unexplained gas regression rather than letting it drift.
+      - name: Gas snapshot is current
+        run: forge snapshot --check
+        working-directory: contracts
+
+  slither:
+    name: Solidity (static analysis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git clone --depth 1 https://github.com/foundry-rs/forge-std contracts/lib/forge-std
+      - uses: crytic/slither-action@v0.4.0
+        with:
+          target: contracts
+          slither-args: --exclude-dependencies
+          fail-on: medium
 
   python:
     name: Python bindings (bridges to the built CLI)
