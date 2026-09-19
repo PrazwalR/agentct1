@@ -15,10 +15,20 @@ export interface StoredEntry {
 export interface AuditStore {
   insert(entry: AuditEntry): Promise<void>;
   list(agentId?: string): Promise<AuditEntry[]>;
+  /**
+   * Entries for an agent at or after `sinceMs`, oldest first. Used to rehydrate
+   * guard state on startup without reading a table that grows without bound.
+   */
+  listSince(agentId: string, sinceMs: number): Promise<AuditEntry[]>;
   getById(id: string): Promise<StoredEntry | undefined>;
   unbatched(): Promise<AuditEntry[]>;
-  markBatched(ids: string[], batchIndex: number): Promise<void>;
+  /** Tag entries as anchored. The root is recorded so a reorg can be detected later. */
+  markBatched(ids: string[], batchIndex: number, batchRoot: string): Promise<void>;
   entriesInBatch(batchIndex: number): Promise<AuditEntry[]>;
+  /** Distinct (batchIndex, root) pairs recorded locally, for reconciliation. */
+  anchoredBatches(): Promise<Array<[number, string]>>;
+  /** Un-tag a batch so its entries are re-anchored. Returns rows released. */
+  releaseBatch(batchIndex: number): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -33,6 +43,7 @@ export interface AuditRow {
   settlement_json: string | null;
   entry_hash: string;
   batch_index: number | string | null;
+  batch_root: string | null;
 }
 
 export function serializeRequest(r: PaymentRequest): string {
@@ -71,10 +82,12 @@ CREATE TABLE IF NOT EXISTS audit_entries (
   decision_json TEXT NOT NULL,
   settlement_json TEXT,
   entry_hash    TEXT NOT NULL,
-  batch_index   INTEGER
+  batch_index   INTEGER,
+  batch_root    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_entries(agent_id);
 CREATE INDEX IF NOT EXISTS idx_audit_batch ON audit_entries(batch_index);
+CREATE INDEX IF NOT EXISTS idx_audit_agent_ts ON audit_entries(agent_id, timestamp);
 `;
 
 export class SqliteAuditStore implements AuditStore {
@@ -87,6 +100,13 @@ export class SqliteAuditStore implements AuditStore {
       this._db = new Database(this.path);
       this._db.pragma("journal_mode = WAL");
       this._db.exec(SQLITE_SCHEMA);
+      // Migrate a pre-existing table: CREATE TABLE IF NOT EXISTS won't add a column.
+      const cols = this._db.prepare("PRAGMA table_info(audit_entries)").all() as Array<{
+        name: string;
+      }>;
+      if (!cols.some((c) => c.name === "batch_root")) {
+        this._db.exec("ALTER TABLE audit_entries ADD COLUMN batch_root TEXT");
+      }
     }
     return this._db;
   }
@@ -119,6 +139,15 @@ export class SqliteAuditStore implements AuditStore {
     return rows.map(rowToEntry);
   }
 
+  async listSince(agentId: string, sinceMs: number): Promise<AuditEntry[]> {
+    const rows = this.db()
+      .prepare(
+        "SELECT * FROM audit_entries WHERE agent_id = ? AND timestamp >= ? ORDER BY timestamp, rowid",
+      )
+      .all(agentId, sinceMs) as AuditRow[];
+    return rows.map(rowToEntry);
+  }
+
   async getById(id: string): Promise<StoredEntry | undefined> {
     const row = this.db().prepare("SELECT * FROM audit_entries WHERE id = ?").get(id) as
       AuditRow | undefined;
@@ -133,13 +162,34 @@ export class SqliteAuditStore implements AuditStore {
     return rows.map(rowToEntry);
   }
 
-  async markBatched(ids: string[], batchIndex: number): Promise<void> {
+  async markBatched(ids: string[], batchIndex: number, batchRoot: string): Promise<void> {
     const db = this.db();
-    const stmt = db.prepare("UPDATE audit_entries SET batch_index = ? WHERE id = ?");
+    const stmt = db.prepare(
+      "UPDATE audit_entries SET batch_index = ?, batch_root = ? WHERE id = ?",
+    );
     const tx = db.transaction((batch: string[]) => {
-      for (const id of batch) stmt.run(batchIndex, id);
+      for (const id of batch) stmt.run(batchIndex, batchRoot, id);
     });
     tx(ids);
+  }
+
+  async anchoredBatches(): Promise<Array<[number, string]>> {
+    const rows = this.db()
+      .prepare(
+        "SELECT DISTINCT batch_index, batch_root FROM audit_entries " +
+          "WHERE batch_index IS NOT NULL AND batch_root IS NOT NULL ORDER BY batch_index",
+      )
+      .all() as Array<{ batch_index: number; batch_root: string }>;
+    return rows.map((r) => [Number(r.batch_index), r.batch_root]);
+  }
+
+  async releaseBatch(batchIndex: number): Promise<number> {
+    const info = this.db()
+      .prepare(
+        "UPDATE audit_entries SET batch_index = NULL, batch_root = NULL WHERE batch_index = ?",
+      )
+      .run(batchIndex);
+    return info.changes;
   }
 
   async entriesInBatch(batchIndex: number): Promise<AuditEntry[]> {

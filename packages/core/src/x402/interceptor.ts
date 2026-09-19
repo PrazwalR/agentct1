@@ -13,8 +13,12 @@ export interface IntentStore {
   intent?: string;
   /** Resource URL being requested. */
   resourceUrl?: string;
-  /** Decisions made during this request, popped by the response hook for audit. */
-  pending: Array<{ req: PaymentRequest; decision: PolicyDecision }>;
+  /**
+   * Decisions made during this request, popped by the response hook for audit.
+   * `recorded` marks an entry the before-hook already wrote to the audit log
+   * (an aborted payment), so the response hook never double-records it.
+   */
+  pending: Array<{ req: PaymentRequest; decision: PolicyDecision; recorded?: boolean }>;
 }
 
 /**

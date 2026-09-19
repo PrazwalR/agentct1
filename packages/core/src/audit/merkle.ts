@@ -1,17 +1,38 @@
 import { StandardMerkleTree } from "@openzeppelin/merkle-tree";
-import type { Hex } from "viem";
+import type { Address, Hex } from "viem";
 import type { AuditEntry, Verdict } from "../types.js";
 
 /**
- * Leaf encoding. Uses @openzeppelin/merkle-tree (StandardMerkleTree) so the
- * root, leaf hashing (double-keccak of abi.encode), and sorted-pair proofs
- * match AuditAnchor.sol's verifyEntry exactly. The earlier hand-rolled tree in
- * the v0.1 guide used index-ordered pairs and would NOT verify against the
- * contract — this is the corrected path.
+ * Leaf encoding. Uses @openzeppelin/merkle-tree (StandardMerkleTree) so the root,
+ * leaf hashing (double-keccak of abi.encode), and sorted-pair proofs match
+ * AuditAnchor.sol's `leafHash`/`verifyEntry` exactly.
+ *
+ * The first three fields are domain separation, not audit data: binding the chain
+ * id, the anchor deployment, and the operator into every leaf means a root
+ * committed on Sepolia cannot be verified against mainnet, and a published root
+ * cannot be replayed under someone else's operator address to claim authorship.
+ * The contract recomputes all three from `block.chainid`, `address(this)`, and its
+ * `operator` argument, so a client cannot lie about them.
  */
-export const LEAF_TYPES = ["string", "uint256", "address", "uint8", "bytes32"] as const;
+export const LEAF_TYPES = [
+  "uint256", // chainId
+  "address", // anchor contract
+  "address", // operator
+  "string", // agentId
+  "uint256", // entry timestamp
+  "address", // recipient
+  "uint8", // verdict
+  "bytes32", // entryHash
+] as const;
 
-export type LeafTuple = [string, bigint, string, number, Hex];
+export type LeafTuple = [bigint, Address, Address, string, bigint, Address, number, Hex];
+
+/** Identifies which anchor deployment, on which chain, under which operator. */
+export interface LeafContext {
+  chainId: bigint;
+  anchor: Address;
+  operator: Address;
+}
 
 const ZERO_ROOT = `0x${"0".repeat(64)}` as Hex;
 
@@ -19,8 +40,11 @@ function verdictToNum(v: Verdict): number {
   return { allow: 0, escalate: 1, block: 2 }[v];
 }
 
-export function entryToLeaf(e: AuditEntry): LeafTuple {
+export function entryToLeaf(e: AuditEntry, ctx: LeafContext): LeafTuple {
   return [
+    ctx.chainId,
+    ctx.anchor,
+    ctx.operator,
     e.agentId,
     BigInt(e.timestamp),
     e.request.recipient,
@@ -29,13 +53,19 @@ export function entryToLeaf(e: AuditEntry): LeafTuple {
   ];
 }
 
-/** Batches audit entries into a Merkle tree whose root is committed on-chain. */
+/**
+ * Batches audit entries into a Merkle tree whose root is committed on-chain.
+ * The context is required because it is part of every leaf — a batch built for one
+ * anchor/chain/operator is deliberately not reusable against another.
+ */
 export class MerkleAuditBatch {
   private readonly values: LeafTuple[] = [];
   private tree?: StandardMerkleTree<LeafTuple>;
 
+  constructor(private readonly ctx: LeafContext) {}
+
   addEntry(entry: AuditEntry): void {
-    this.values.push(entryToLeaf(entry));
+    this.values.push(entryToLeaf(entry, this.ctx));
     this.tree = undefined; // invalidate cache
   }
 

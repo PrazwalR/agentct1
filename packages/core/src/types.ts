@@ -56,6 +56,11 @@ export interface Policy {
 export type PolicyRule =
   SpendCapRule | AllowlistRule | RateLimitRule | CounterpartyRule | TimeWindowRule;
 
+/**
+ * Spend-cap horizons. "transaction" is the single payment; "hour"/"day" are rolling
+ * windows rebuilt from the audit log on startup; "session" covers only the current
+ * process run and deliberately does NOT carry over across restarts.
+ */
 export type SpendWindow = "transaction" | "session" | "hour" | "day";
 
 export interface SpendCapRule {

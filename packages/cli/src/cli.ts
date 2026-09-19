@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { Command } from "commander";
 import { type Address, formatUnits, parseUnits } from "viem";
-import { generatePrivateKey } from "viem/accounts";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { serveControlPlane } from "@agentctl/server";
 import {
   ApprovalQueue,
@@ -52,6 +52,8 @@ program
   .option("--chain <caip2>", "CAIP-2 chain id", DEFAULT_CHAIN)
   .option("--policy <file>", "policy JSON file (default: built-in demo policy)")
   .option("--agent <id>", "agent id", "cli-agent")
+  .option("--db <file>", "audit sqlite path — history to evaluate against", DEFAULT_DB)
+  .option("--no-history", "ignore recorded history (evaluate from a cold start)")
   .option("--llm", "enable the LLM intent check (Anthropic key or a local Ollama)")
   .option("--provider <name>", "llm provider: anthropic or ollama (default: auto-detect from env)")
   .option("--ollama-url <url>", "ollama server URL (default http://127.0.0.1:11434)")
@@ -64,10 +66,14 @@ program
       : demoPolicy(opts.agent);
 
     const wallet = new ViemAdapter({ privateKey: generatePrivateKey(), chain });
+    // Bind the audit db so the dry-run is evaluated against spend that actually
+    // happened — without it a rolling cap like "max $20/day" always reads as unused.
     const guard = await createGuard({
       wallet,
       policy,
       llm: opts.llm ? resolveCliLLM(opts) : undefined,
+      auditStore: opts.db,
+      hydrate: opts.history !== false,
     });
 
     const token = String(opts.token).toUpperCase() === "USDC" ? cfg.usdc : (opts.token as Address);
@@ -81,6 +87,7 @@ program
     };
 
     renderDecision(req, await guard.evaluate(req));
+    await guard.auditLog.close();
   });
 
 // ─── policy create ───────────────────────────────────────────────────────────
@@ -111,6 +118,10 @@ program
   .option("--db <file>", "audit sqlite path", DEFAULT_DB)
   .option("--chain <caip2>", "CAIP-2 chain id", DEFAULT_CHAIN)
   .option("--verify", "verify each anchored entry against AuditAnchor.sol")
+  .option(
+    "--operator <address>",
+    "operator whose batches to verify against (default: derived from ANCHOR_COMMITTER_KEY)",
+  )
   .action(async (opts) => {
     const log = new AuditLogger(opts.db);
     const entries = await log.list({ agentId: opts.agent });
@@ -132,7 +143,7 @@ program
           `${formatUnits(e.request.amount, 6)} USDC → ${e.request.recipient.slice(0, 10)}…  ${settle}  [${e.id.slice(0, 8)}]`,
       );
     }
-    if (opts.verify) await verifyEntries(log, opts.chain, opts.agent);
+    if (opts.verify) await verifyEntries(log, opts.chain, opts.agent, opts.operator);
     await log.close();
   });
 
@@ -203,7 +214,7 @@ program
   .option("--db <file>", "audit sqlite path", DEFAULT_DB)
   .action(async (opts) => {
     const known = "0x000000000000000000000000000000000000beef" as Address;
-    const attacker = "0x00000000000000000000000000000000deAddEad" as Address;
+    const attacker = "0x00000000000000000000000000000000dEadDEaD" as Address;
     const usdc = getChain(DEFAULT_CHAIN).usdc;
     const policy: Policy = {
       agentId: "research-agent-1",
@@ -357,6 +368,9 @@ program
       wallet: new ViemAdapter({ privateKey: generatePrivateKey(), chain: request.chain }),
       policy,
       llm,
+      // `db` opts the bridge into shared, persistent state: each `eval` runs in its
+      // own process, so without a store every call would evaluate from a cold start.
+      ...(request.db ? { auditStore: request.db as string } : { hydrate: false }),
     });
     const req: PaymentRequest = {
       intent: request.intent ?? "",
@@ -376,6 +390,7 @@ program
         checks: decision.checks,
       })}\n`,
     );
+    await guard.auditLog.close();
   });
 
 program.parseAsync().catch((err) => {
@@ -449,38 +464,176 @@ function renderDecision(req: PaymentRequest, decision: PolicyDecision): void {
   if (decision.verdict === "block") process.exitCode = 2;
 }
 
+/**
+ * Select the RPC for a chain.
+ *
+ * Previously this always used RPC_BASE_SEPOLIA regardless of --chain, so verifying
+ * a mainnet anchor silently read Base Sepolia and reported success (viem does not
+ * check chain id on plain reads). assertChainId() below is the backstop.
+ */
+function rpcUrlFor(chain: string): string | undefined {
+  const byChain: Record<string, string | undefined> = {
+    "eip155:8453": process.env.RPC_BASE,
+    "eip155:84532": process.env.RPC_BASE_SEPOLIA,
+  };
+  // Undefined falls through to the chain's built-in default RPC in makePublicClient.
+  return byChain[chain];
+}
+
+/**
+ * Verify the audit log against the on-chain anchor.
+ *
+ * Checks four distinct things, because inclusion alone is a weak guarantee:
+ *   1. the RPC really is the configured chain;
+ *   2. every anchored entry is provably in its batch (the contract recomputes the
+ *      leaf from the entry's fields — no pre-hashed leaf is accepted);
+ *   3. each batch's local membership matches the count committed on chain, and the
+ *      operator's total committed count matches what is stored locally — this is
+ *      what catches a *deleted* entry, which inclusion proofs can never reveal;
+ *   4. no entry claims a timestamp after the batch that anchored it.
+ */
 async function verifyEntries(
   log: AuditLogger,
   chain: string,
   agent: string | undefined,
+  operatorOverride?: string,
 ): Promise<void> {
   const contractAddress = process.env.AUDIT_ANCHOR_ADDRESS;
-  const committerKey = process.env.ANCHOR_COMMITTER_KEY as `0x${string}` | undefined;
-  if (!contractAddress || !committerKey) {
-    console.log("\n(--verify needs AUDIT_ANCHOR_ADDRESS + ANCHOR_COMMITTER_KEY in env)");
+  if (!contractAddress) {
+    console.log("\n(--verify needs AUDIT_ANCHOR_ADDRESS in env)");
     return;
   }
+  // Verification needs only the operator's PUBLIC address. Requiring the committer
+  // key meant only the party being audited could check the log.
+  const committerKey = process.env.ANCHOR_COMMITTER_KEY as `0x${string}` | undefined;
+  const operator = (operatorOverride ??
+    (committerKey ? privateKeyToAccount(committerKey).address : undefined)) as Address | undefined;
+  if (!operator) {
+    console.log("\n(--verify needs --operator <address>, or ANCHOR_COMMITTER_KEY in env)");
+    return;
+  }
+
   const anchor = new AuditAnchorClient({
     chain,
     contractAddress: contractAddress as Address,
-    committerKey,
-    rpcUrl: process.env.RPC_BASE_SEPOLIA,
+    rpcUrl: rpcUrlFor(chain),
   });
-  const operator = anchor.operatorAddress();
-  console.log("\nverification:");
-  for (const e of await log.list({ agentId: agent })) {
-    const proof = await log.proofFor(e.id);
-    if (!proof) {
-      console.log(`  ${e.id.slice(0, 8)}  not anchored yet`);
+
+  try {
+    await anchor.assertChainId();
+  } catch (err) {
+    console.log(`\n✗ ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const ctx = anchor.leafContext(operator);
+  const entries = await log.list({ agentId: agent });
+  console.log(`\nverification (operator ${operator} on ${chain}):`);
+
+  // Group by batch so each batch's tree is built once, not once per entry.
+  const byBatch = new Map<number, typeof entries>();
+  let unanchored = 0;
+  for (const e of entries) {
+    const stored = await log.getById(e.id);
+    const idx = stored?.batchIndex ?? null;
+    if (idx === null) {
+      unanchored++;
       continue;
     }
-    const batch = await anchor.getBatch(operator, proof.batchIndex);
-    const onchain = await anchor.verifyEntry(operator, proof.batchIndex, proof.leaf, proof.proof);
-    const rootMatch = batch.root.toLowerCase() === proof.localRoot.toLowerCase();
-    console.log(
-      `  ${e.id.slice(0, 8)}  batch#${proof.batchIndex}  ${
-        onchain && rootMatch ? "✓ verified on-chain" : "✗ MISMATCH"
-      }`,
-    );
+    const group = byBatch.get(idx) ?? [];
+    group.push(e);
+    byBatch.set(idx, group);
   }
+
+  let verified = 0;
+  let failed = 0;
+  let errored = 0;
+  const problems: string[] = [];
+
+  for (const [batchIndex, group] of [...byBatch.entries()].sort((a, b) => a[0] - b[0])) {
+    try {
+      const onChain = await anchor.getBatch(operator, batchIndex);
+      if (!onChain.found) {
+        problems.push(`batch#${batchIndex} is not on chain (${group.length} entries affected)`);
+        failed += group.length;
+        console.log(`  batch#${batchIndex}  ✗ NOT ON CHAIN`);
+        continue;
+      }
+
+      const proofs = await log.proofsForBatch(batchIndex, ctx);
+      const localRoot = [...proofs.values()][0]?.localRoot;
+      if (localRoot && localRoot.toLowerCase() !== onChain.root.toLowerCase()) {
+        problems.push(`batch#${batchIndex} local root does not match the committed root`);
+      }
+      // Inclusion proofs cannot reveal a removed entry; only the count can.
+      if (proofs.size !== onChain.entryCount) {
+        problems.push(
+          `batch#${batchIndex} holds ${proofs.size} entries locally but ${onChain.entryCount} were committed ` +
+            `— ${onChain.entryCount - proofs.size} entries are missing from the local log`,
+        );
+      }
+
+      for (const e of group) {
+        const proof = proofs.get(e.id);
+        if (!proof) {
+          errored++;
+          console.log(`  ${e.id.slice(0, 8)}  ⚠ not present in its own batch`);
+          continue;
+        }
+        const ok = await anchor.verifyEntry(operator, batchIndex, proof.fields, proof.proof);
+        // An entry cannot legitimately postdate the batch that anchored it.
+        const withinTime = e.timestamp <= onChain.timestamp * 1000;
+        if (!withinTime) {
+          problems.push(`${e.id.slice(0, 8)} claims a timestamp after batch#${batchIndex}`);
+        }
+        if (ok && withinTime) verified++;
+        else failed++;
+        console.log(
+          `  ${e.id.slice(0, 8)}  batch#${batchIndex}  ${
+            ok && withinTime ? "✓ verified on-chain" : "✗ MISMATCH"
+          }`,
+        );
+      }
+    } catch (err) {
+      // One bad batch must not discard every already-confirmed result.
+      errored += group.length;
+      console.log(
+        `  batch#${batchIndex}  ⚠ could not verify: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  // Completeness across the whole chain: the operator cannot hide a dropped batch.
+  // Only meaningful over the whole log — under --agent the local set is a subset of
+  // what was committed, so the counts are expected to differ.
+  if (agent === undefined) {
+    try {
+      const committedTotal = (await anchor.getAllBatches(operator)).reduce(
+        (sum, b) => sum + b.entryCount,
+        0,
+      );
+      const anchoredLocally = entries.length - unanchored;
+      if (committedTotal !== anchoredLocally) {
+        problems.push(
+          `operator committed ${committedTotal} entries on chain but the local log holds ` +
+            `${anchoredLocally} anchored entries`,
+        );
+      }
+    } catch {
+      problems.push("could not read the operator's full batch list for a completeness check");
+    }
+  } else {
+    console.log("  (completeness check skipped — it needs the full log, not --agent)");
+  }
+
+  console.log(
+    `\n  ${verified} verified, ${failed} mismatched, ${unanchored} not yet anchored, ${errored} errored`,
+  );
+  for (const p of problems) console.log(`  ⚠ ${p}`);
+
+  // A mismatch or a completeness gap is a real integrity failure; an error is
+  // inconclusive. Distinguish them so a config mistake is not read as tampering.
+  if (failed > 0 || problems.length > 0) process.exitCode = 2;
+  else if (errored > 0) process.exitCode = 1;
 }

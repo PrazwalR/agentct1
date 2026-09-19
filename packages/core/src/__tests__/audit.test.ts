@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { parseUnits, type Address } from "viem";
 import { AuditLogger, hashEntry } from "../audit/logger.js";
-import { MerkleAuditBatch } from "../audit/merkle.js";
+import { MerkleAuditBatch, type LeafContext } from "../audit/merkle.js";
 import type { AuditEntry, PaymentRequest, PolicyDecision } from "../types.js";
 
 const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e" as Address;
+
+// Leaves are domain-separated by chain/anchor/operator, so a batch is built for a
+// specific deployment rather than in the abstract.
+const CTX: LeafContext = {
+  chainId: 84532n,
+  anchor: "0x5FbDB2315678afecb367f032d93F642f64180aa3" as Address,
+  operator: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" as Address,
+};
 const addr = (i: number): Address => `0x${(i + 1).toString(16).padStart(40, "0")}` as Address;
 
 function mkReq(i: number): PaymentRequest {
@@ -39,7 +47,7 @@ function mkEntry(i: number): AuditEntry {
 
 describe("merkle batch (OZ StandardMerkleTree)", () => {
   it("produces a 32-byte root and verifies every leaf locally", () => {
-    const batch = new MerkleAuditBatch();
+    const batch = new MerkleAuditBatch(CTX);
     for (let i = 0; i < 5; i++) batch.addEntry(mkEntry(i));
     expect(batch.size()).toBe(5);
     expect(batch.root()).toMatch(/^0x[0-9a-fA-F]{64}$/);
@@ -47,7 +55,7 @@ describe("merkle batch (OZ StandardMerkleTree)", () => {
   });
 
   it("verifies a single-entry batch (root == leaf, empty proof)", () => {
-    const batch = new MerkleAuditBatch();
+    const batch = new MerkleAuditBatch(CTX);
     batch.addEntry(mkEntry(0));
     expect(batch.proofAt(0)).toEqual([]);
     expect(batch.verify(0)).toBe(true);

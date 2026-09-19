@@ -1,4 +1,4 @@
-import type { Verdict } from "./types.js";
+import type { AuditEntry, Verdict } from "./types.js";
 
 export interface CircuitBreakerConfig {
   /** Sliding window (seconds) over which failures are counted. */
@@ -58,6 +58,23 @@ export class CircuitBreaker {
     this.prune(now);
     if (this.openedAt === undefined && this.shouldTrip()) {
       this.openedAt = now;
+    }
+  }
+
+  /**
+   * Rebuild window state from recorded history. A restart must not silently
+   * un-freeze an agent that had already tripped, so entries inside the window are
+   * replayed through record() — which re-runs the trip check for free.
+   */
+  hydrate(entries: AuditEntry[], now = Date.now()): void {
+    const cutoff = now - this.cfg.windowSeconds * 1000;
+    const inWindow = entries
+      .filter((e) => e.timestamp > cutoff)
+      .sort((a, b) => a.timestamp - b.timestamp);
+    for (const e of inWindow) {
+      // Same anomaly predicate AgentGuard.runGuard uses when recording live.
+      const anomaly = e.decision.checks.some((c) => !c.passed && c.id.startsWith("behavioral-"));
+      this.record(e.decision.verdict, anomaly, e.timestamp);
     }
   }
 

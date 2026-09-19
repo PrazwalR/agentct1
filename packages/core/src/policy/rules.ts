@@ -67,17 +67,45 @@ export function checkSpendCap(rule: SpendCapRule, ctx: RuleContext): RuleResult 
   return pass(id, `within ${rule.window} cap (${usdc(total)} / ${usdc(rule.maxAmount)})`);
 }
 
+/**
+ * Match a resource URL against one allowlist entry.
+ *
+ * Entries are host-based, optionally with a path prefix: "api.trusted.com" or
+ * "api.trusted.com/v2". A bare substring match would be trivially bypassable —
+ * `https://evil.example/?ref=api.trusted.com` contains "api.trusted.com" — so the
+ * URL is parsed and the host compared structurally.
+ */
+function resourceMatches(url: URL, entry: string): boolean {
+  const slash = entry.indexOf("/");
+  const entryHost = slash === -1 ? entry : entry.slice(0, slash);
+  const entryPath = slash === -1 ? "" : entry.slice(slash);
+  if (!entryHost) return false;
+
+  const host = url.host.toLowerCase();
+  // Exact host, or a subdomain of it — never a host that merely ends with the
+  // entry's characters (`evil-api.trusted.com.attacker.net` must not match).
+  const hostOk = host === entryHost || host.endsWith(`.${entryHost}`);
+  if (!hostOk) return false;
+  if (!entryPath) return true;
+
+  const path = url.pathname.toLowerCase();
+  // "/v2" allows "/v2" and "/v2/..." but not "/v2xyz".
+  const prefix = entryPath.replace(/\/+$/, "");
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+
 export function checkAllowlist(rule: AllowlistRule, ctx: RuleContext): RuleResult {
   const id = `allowlist-${rule.mode}`;
   const target =
     rule.mode === "recipients" ? ctx.req.recipient.toLowerCase() : (ctx.req.resourceUrl ?? "");
-  // Drop empty entries: for resources mode `target.includes("")` is always true,
-  // which would silently turn an enforced allowlist into a no-op.
-  const entries = rule.entries.filter((e) => e.length > 0);
+  // Normalize here rather than trusting the policy's author: compilePolicy lowercases
+  // its output, but a hand-written policy.json with EIP-55 checksummed addresses (the
+  // form every explorer and wallet emits) would otherwise match nothing — silently
+  // blocking every payment under `enforce`, or warning on every legitimate one without.
+  // Empty entries are dropped: they would match everything and turn the rule into a no-op.
+  const entries = rule.entries.map((e) => e.trim().toLowerCase()).filter((e) => e.length > 0);
   const ok =
-    rule.mode === "recipients"
-      ? entries.includes(target)
-      : target.length > 0 && entries.some((e) => target.includes(e));
+    rule.mode === "recipients" ? entries.includes(target) : matchesResource(target, entries);
 
   if (ok) return pass(id, `${rule.mode} allowlisted`);
   if (rule.enforce) {
@@ -100,6 +128,18 @@ export function checkAllowlist(rule: AllowlistRule, ctx: RuleContext): RuleResul
     },
     escalate: false,
   };
+}
+
+/** Parse the resource URL and test it against every entry. Unparseable → fail closed. */
+function matchesResource(target: string, entries: string[]): boolean {
+  if (target.length === 0 || entries.length === 0) return false;
+  let url: URL;
+  try {
+    url = new URL(target);
+  } catch {
+    return false; // not a URL we can reason about — do not allowlist it
+  }
+  return entries.some((e) => resourceMatches(url, e));
 }
 
 export function checkRateLimit(rule: RateLimitRule, ctx: RuleContext): RuleResult {

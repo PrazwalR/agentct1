@@ -1,4 +1,11 @@
-import type { PaymentRequest, Policy, PolicyCheck, PolicyRule, SpendWindow } from "../types.js";
+import type {
+  AuditEntry,
+  PaymentRequest,
+  Policy,
+  PolicyCheck,
+  PolicyRule,
+  SpendWindow,
+} from "../types.js";
 import {
   type RuleContext,
   type RuleResult,
@@ -19,6 +26,8 @@ interface SpendRecord {
   ts: number;
   amount: bigint;
   token: string;
+  /** Replayed from the audit log rather than observed in this process. */
+  hydrated?: boolean;
 }
 
 const HOUR_MS = 3_600_000;
@@ -82,17 +91,52 @@ export class PolicyEvaluator {
   }
 
   /** Record a settled payment, advancing spend windows + counterparty memory. */
-  observe(req: PaymentRequest): void {
-    this.payments.push({ ts: Date.now(), amount: req.amount, token: req.token.toLowerCase() });
+  observe(req: PaymentRequest, at = Date.now()): void {
+    this.payments.push({ ts: at, amount: req.amount, token: req.token.toLowerCase() });
     this.seen.add(req.recipient.toLowerCase());
   }
 
+  /**
+   * Rebuild state from recorded history so spend windows and counterparty memory
+   * survive a restart — without this, "max $20/day" silently resets every time the
+   * process starts and is not actually enforced.
+   *
+   * The two kinds of state have deliberately different horizons:
+   *   • counterparty memory is seeded from the ENTIRE history — recognizing a
+   *     previously-paid recipient across restarts is the whole point of the rule;
+   *   • spend records only matter within the last day, since no window looks
+   *     further back, so older entries are dropped.
+   *
+   * Replayed spend records are tagged `hydrated` and excluded from the `session`
+   * window, which stays process-scoped — otherwise "session" would silently come
+   * to mean "all recorded history".
+   */
+  hydrate(entries: AuditEntry[], now = Date.now()): void {
+    const cutoff = now - DAY_MS;
+    for (const e of entries) {
+      this.seen.add(e.request.recipient.toLowerCase());
+      if (e.timestamp > cutoff) {
+        this.payments.push({
+          ts: e.timestamp,
+          amount: e.request.amount,
+          token: e.request.token.toLowerCase(),
+          hydrated: true,
+        });
+      }
+    }
+    this.payments.sort((a, b) => a.ts - b.ts);
+  }
+
   private windowedSpend(window: SpendWindow, token: string, now: number): bigint {
-    const cutoff = window === "hour" ? now - HOUR_MS : window === "day" ? now - DAY_MS : 0; // session = all-time
+    const cutoff = window === "hour" ? now - HOUR_MS : window === "day" ? now - DAY_MS : 0;
     const t = token.toLowerCase();
-    return this.payments
-      .filter((p) => p.token === t && p.ts > cutoff)
-      .reduce((sum, p) => sum + p.amount, 0n);
+    return (
+      this.payments
+        .filter((p) => p.token === t && p.ts > cutoff)
+        // "session" means this process's run, not all of recorded history.
+        .filter((p) => window !== "session" || !p.hydrated)
+        .reduce((sum, p) => sum + p.amount, 0n)
+    );
   }
 }
 

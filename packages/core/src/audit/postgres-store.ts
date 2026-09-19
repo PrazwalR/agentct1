@@ -19,10 +19,13 @@ CREATE TABLE IF NOT EXISTS audit_entries (
   decision_json TEXT NOT NULL,
   settlement_json TEXT,
   entry_hash    TEXT NOT NULL,
-  batch_index   INTEGER
+  batch_index   INTEGER,
+  batch_root    TEXT
 );
+ALTER TABLE audit_entries ADD COLUMN IF NOT EXISTS batch_root TEXT;
 CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_entries(agent_id);
 CREATE INDEX IF NOT EXISTS idx_audit_batch ON audit_entries(batch_index);
+CREATE INDEX IF NOT EXISTS idx_audit_agent_ts ON audit_entries(agent_id, timestamp);
 `;
 
 /**
@@ -86,6 +89,15 @@ export class PostgresAuditStore implements AuditStore {
     return (res.rows as AuditRow[]).map(rowToEntry);
   }
 
+  async listSince(agentId: string, sinceMs: number): Promise<AuditEntry[]> {
+    const pool = await this.ready();
+    const res = await pool.query(
+      "SELECT * FROM audit_entries WHERE agent_id = $1 AND timestamp >= $2 ORDER BY timestamp, seq",
+      [agentId, sinceMs],
+    );
+    return (res.rows as AuditRow[]).map(rowToEntry);
+  }
+
   async getById(id: string): Promise<StoredEntry | undefined> {
     const pool = await this.ready();
     const res = await pool.query("SELECT * FROM audit_entries WHERE id = $1", [id]);
@@ -101,7 +113,7 @@ export class PostgresAuditStore implements AuditStore {
     return (res.rows as AuditRow[]).map(rowToEntry);
   }
 
-  async markBatched(ids: string[], batchIndex: number): Promise<void> {
+  async markBatched(ids: string[], batchIndex: number, batchRoot: string): Promise<void> {
     const pool = await this.ready();
     // Atomic: a crash mid-loop after the on-chain commit must not leave a split
     // batch (some rows tagged, some NULL) that can never be proven again.
@@ -109,10 +121,10 @@ export class PostgresAuditStore implements AuditStore {
     try {
       await client.query("BEGIN");
       for (const id of ids) {
-        await client.query("UPDATE audit_entries SET batch_index = $1 WHERE id = $2", [
-          batchIndex,
-          id,
-        ]);
+        await client.query(
+          "UPDATE audit_entries SET batch_index = $1, batch_root = $2 WHERE id = $3",
+          [batchIndex, batchRoot, id],
+        );
       }
       await client.query("COMMIT");
     } catch (err) {
@@ -121,6 +133,27 @@ export class PostgresAuditStore implements AuditStore {
     } finally {
       client.release();
     }
+  }
+
+  async anchoredBatches(): Promise<Array<[number, string]>> {
+    const pool = await this.ready();
+    const res = await pool.query(
+      "SELECT DISTINCT batch_index, batch_root FROM audit_entries " +
+        "WHERE batch_index IS NOT NULL AND batch_root IS NOT NULL ORDER BY batch_index",
+    );
+    return (res.rows as Array<{ batch_index: number; batch_root: string }>).map((r) => [
+      Number(r.batch_index),
+      r.batch_root,
+    ]);
+  }
+
+  async releaseBatch(batchIndex: number): Promise<number> {
+    const pool = await this.ready();
+    const res = await pool.query(
+      "UPDATE audit_entries SET batch_index = NULL, batch_root = NULL WHERE batch_index = $1",
+      [batchIndex],
+    );
+    return res.rowCount ?? 0;
   }
 
   async entriesInBatch(batchIndex: number): Promise<AuditEntry[]> {

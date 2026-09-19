@@ -1,4 +1,4 @@
-import type { PaymentRequest, PolicyCheck } from "../types.js";
+import type { AuditEntry, PaymentRequest, PolicyCheck } from "../types.js";
 import { EWMABaseline } from "./baseline.js";
 import { extractFeatures } from "./features.js";
 import { IsolationForest } from "./forest.js";
@@ -35,6 +35,8 @@ const DEFAULT_Z_WARN = 3;
 const DEFAULT_Z_CRITICAL = 5;
 const DEFAULT_FOREST_WARN = 0.7;
 const DEFAULT_FOREST_CRITICAL = 0.85;
+/** Upper bound on replayed history (matches EWMABaseline's ring-buffer caps). */
+const MAX_REPLAY = 10_000;
 
 /**
  * Behavioral anomaly detection for agent spending.
@@ -119,13 +121,29 @@ export class BehavioralScorer {
     return { score, anomalyChecks: checks };
   }
 
-  /** Record a payment as legitimate, updating the baseline + (re)training the forest. */
-  async observe(req: PaymentRequest): Promise<void> {
-    const f = extractFeatures(req, this.baseline);
+  /**
+   * Rebuild the baseline from recorded history so a restart does not reset the
+   * agent to a cold start. Replays each settled payment at its real timestamp.
+   *
+   * Capped at the most recent `MAX_REPLAY` entries, matching EWMABaseline's own
+   * ring-buffer limits — older observations are already outside what the
+   * baseline would have retained, so replaying them buys nothing.
+   */
+  async hydrate(entries: AuditEntry[]): Promise<void> {
+    const ordered = [...entries].sort((a, b) => a.timestamp - b.timestamp).slice(-MAX_REPLAY);
+    for (const e of ordered) await this.observe(e.request, e.timestamp);
+  }
+
+  /**
+   * Record a payment as legitimate, updating the baseline + (re)training the forest.
+   * `at` (unix ms) is injectable so audit-log history replays at its real times.
+   */
+  async observe(req: PaymentRequest, at = Date.now()): Promise<void> {
+    const f = extractFeatures(req, this.baseline, at);
     this.baseline.update("amount", f.amount);
     if (this.observationCount > 0) this.baseline.update("interval", f.secondsSinceLast);
     this.baseline.recordCounterparty(req.recipient);
-    this.baseline.recordTimestamp(Date.now());
+    this.baseline.recordTimestamp(at);
     this.baseline.recordVector(f.vector);
     this.observationCount++;
 

@@ -1,4 +1,4 @@
-import type { Hex } from "viem";
+import { isAddress, type Hex } from "viem";
 import { wrapFetchWithPayment, x402Client } from "@x402/fetch";
 import type { PaymentRequired, PaymentRequirements } from "@x402/fetch";
 import { ExactEvmScheme, toClientEvmSigner } from "@x402/evm";
@@ -15,12 +15,14 @@ import type {
   Verdict,
 } from "./types.js";
 import { DEFAULT_TESTNET_FACILITATOR, getChain } from "./constants.js";
+import { assertAuthorizationMatches } from "./x402/inspect.js";
 import { makePublicClient as makePublicClientFor } from "./adapters/base.js";
 import { PolicyEvaluator } from "./policy/evaluator.js";
 import { compilePolicy } from "./policy/compiler.js";
 import { BehavioralScorer, type BehavioralOptions } from "./behavioral/isolation.js";
 import { IntentReconciler } from "./intent/reconcile.js";
 import { AuditLogger, type AnchorConfig } from "./audit/logger.js";
+import type { AuditStore } from "./audit/store.js";
 import {
   type GuardedFetchOptions,
   type IntentStore,
@@ -46,8 +48,11 @@ export interface GuardConfig {
   /** LLM config for NL policy compilation + intent checks — pass { provider: "ollama" } for a
    *  local, zero-API-key option (needs `ollama serve` running). Overrides llmApiKey if both set. */
   llm?: LLMConfig;
-  /** Audit storage: "sqlite" (default) or a Postgres connection string. */
-  auditStore?: string;
+  /**
+   * Audit storage: "sqlite" (default), a SQLite path, a Postgres connection
+   * string, or an AuditStore instance (for an embedded/in-memory store).
+   */
+  auditStore?: string | AuditStore;
   /** On-chain Merkle anchor config. */
   anchor?: AnchorConfig;
   /** x402 facilitator URL (default: Base Sepolia testnet facilitator). */
@@ -68,7 +73,23 @@ export interface GuardConfig {
   circuitBreaker?: CircuitBreakerConfig;
   /** Tuning for the behavioral Isolation Forest. */
   behavioral?: BehavioralOptions;
+  /**
+   * Rebuild policy windows, counterparty memory, behavioral baselines, and breaker
+   * state from the audit log at construction (default true). Without it every
+   * restart resets the agent to a cold start and a rolling cap like "max $20/day"
+   * is not actually enforced. Set false for a throwaway or pure dry-run guard.
+   */
+  hydrate?: boolean;
+  /**
+   * How far back to replay when hydrating (default 30 days). Counterparty memory
+   * and behavioral baselines use the whole span; spend windows only ever look at
+   * the last day of it.
+   */
+  hydrateLookbackMs?: number;
 }
+
+/** Default rehydration horizon: enough history to train the forest, bounded. */
+const DEFAULT_HYDRATE_LOOKBACK_MS = 30 * 86_400_000;
 
 export interface ExecuteResult {
   executed: boolean;
@@ -121,7 +142,7 @@ export class AgentGuard {
     this.breaker = config.circuitBreaker ? new CircuitBreaker(config.circuitBreaker) : undefined;
   }
 
-  /** Async factory — compiles NL policy if needed. */
+  /** Async factory — compiles NL policy if needed, then rehydrates state. */
   static async create(config: GuardConfig): Promise<AgentGuard> {
     const policy: Policy =
       "naturalLanguage" in config.policy
@@ -132,7 +153,39 @@ export class AgentGuard {
             config.policy.chain ?? config.wallet.chain,
           )
         : config.policy;
-    return new AgentGuard(policy, config);
+    const guard = new AgentGuard(policy, config);
+    if (config.hydrate !== false) {
+      await guard.hydrate(config.hydrateLookbackMs ?? DEFAULT_HYDRATE_LOOKBACK_MS);
+    }
+    return guard;
+  }
+
+  /**
+   * Replay recorded history into the in-memory enforcement state.
+   *
+   * The audit log is already the system of record for every decision, so it is
+   * also the source of truth for rebuilding derived state — no second store to
+   * keep in sync. Settled payments feed the policy windows and the behavioral
+   * baseline; every decision (settled or not) feeds the circuit breaker, which
+   * counts blocks and escalations rather than settlements.
+   *
+   * Never fatal: a guard that cannot read history must still evaluate payments,
+   * so a store failure degrades to a cold start rather than refusing to start.
+   */
+  async hydrate(lookbackMs = DEFAULT_HYDRATE_LOOKBACK_MS): Promise<void> {
+    try {
+      const entries = await this.audit.listSince(this.agentId, Date.now() - lookbackMs);
+      if (entries.length === 0) return;
+      const settled = entries.filter((e) => e.settlement?.success);
+      this.evaluator.hydrate(settled);
+      await this.behavioral.hydrate(settled);
+      this.breaker?.hydrate(entries);
+    } catch (err) {
+      console.warn(
+        `agentctl: could not rehydrate state for ${this.agentId}, starting cold — ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /** Audit log accessor (CLI / tests). */
@@ -143,6 +196,18 @@ export class AgentGuard {
   /** Batch unanchored audit entries into a Merkle tree and commit on-chain. */
   async anchorAudit() {
     return this.audit.flush();
+  }
+
+  /**
+   * Re-check locally-anchored batches against chain, releasing any whose root is
+   * missing or different so the next anchorAudit() re-anchors them.
+   *
+   * Worth running on startup: a reorg or a crash between the commit landing and the
+   * rows being tagged would otherwise leave entries marked anchored against a root
+   * that does not exist, and nothing would ever retry them.
+   */
+  async reconcileAudit() {
+    return this.audit.reconcile();
   }
 
   /** The agent's circuit breaker, if configured (state / counts / manual reset). */
@@ -184,22 +249,18 @@ export class AgentGuard {
         return decision;
       }
 
-      // Reject non-positive amounts at the boundary rather than letting them reach
-      // signing (where they fail cryptically): a negative amount is below every
-      // spend cap and would otherwise aggregate to "allow". Fail closed, auditable.
-      if (req.amount <= 0n) {
+      // Validate the request at the boundary rather than letting it reach signing
+      // (where it fails cryptically) or the rules (where it can pass invisibly):
+      // a negative amount is below every spend cap and would aggregate to "allow",
+      // and a malformed address matches no allowlist entry but is otherwise waved
+      // through by a policy that has no allowlist. Fail closed, auditable.
+      const invalid = validateRequest(req);
+      if (invalid) {
         const decision: PolicyDecision = {
           verdict: "block",
           riskScore: 1,
-          checks: [
-            {
-              id: "invalid-amount",
-              passed: false,
-              severity: "critical",
-              message: `payment amount must be positive (got ${req.amount})`,
-            },
-          ],
-          reason: `Blocked: payment amount must be positive (got ${req.amount})`,
+          checks: [invalid],
+          reason: `Blocked: ${invalid.message}`,
         };
         span.setAttributes(decisionAttrs(decision));
         return decision;
@@ -252,6 +313,8 @@ export class AgentGuard {
       if (!requirements) throw new Error("internal: no payment requirements built");
 
       const payload = await plainClient.createPaymentPayload(paymentRequired);
+      // Never hand the facilitator an authorization that differs from what was approved.
+      assertAuthorizationMatches(payload.payload, req);
       const settleResp = await facilitator.settle(payload, requirements);
       const settlement: Settlement = {
         txHash: settleResp.success ? (settleResp.transaction as Hex) : undefined,
@@ -347,9 +410,23 @@ export class AgentGuard {
         const store = intentStore.getStore();
         const req = requirementsToPaymentRequest(ctx.selectedRequirements, this.agentId, store);
         const { decision, allowed } = await this.runGuard(req);
+        if (!allowed) {
+          // Record HERE, not in onPaymentResponse: aborting makes the x402 client
+          // throw, so the response hook never fires and a blocked payment — the
+          // exact event the audit trail exists to capture — would go unrecorded.
+          await this.audit.record(req, decision);
+          store?.pending.push({ req, decision, recorded: true });
+          return { abort: true, reason: decision.reason };
+        }
         store?.pending.push({ req, decision });
-        if (!allowed) return { abort: true, reason: decision.reason };
         return;
+      })
+      .onAfterPaymentCreation(async (ctx) => {
+        // Verify what was actually signed against what the guard approved. This hook
+        // cannot return an abort, but it runs inside the client's try block — throwing
+        // surfaces as a payment-creation failure, which is the correct fail-closed stop.
+        const pending = intentStore.getStore()?.pending.at(-1);
+        if (pending) assertAuthorizationMatches(ctx.paymentPayload.payload, pending.req);
       })
       .onPaymentResponse(async (ctx) => {
         const store = intentStore.getStore();
@@ -368,7 +445,10 @@ export class AgentGuard {
           await this.behavioral.observe(pending.req);
           this.evaluator.observe(pending.req);
         }
-        await this.audit.record(pending.req, pending.decision, settlement);
+        // Defensive: an aborted payment is already recorded by the before-hook.
+        if (!pending.recorded) {
+          await this.audit.record(pending.req, pending.decision, settlement);
+        }
         return;
       });
 
@@ -401,6 +481,46 @@ export class AgentGuard {
       accepts: [requirements],
     };
   }
+}
+
+/**
+ * Why an address is unacceptable, or null if it is fine.
+ *
+ * A mixed-case address is held to its EIP-55 checksum — that is precisely what the
+ * checksum exists to catch, and a payment to a corrupted address is unrecoverable.
+ * All-lowercase addresses (the common unchecksummed convention) are accepted.
+ */
+function addressProblem(value: string): string | null {
+  if (!isAddress(value, { strict: false })) return "is not a valid address";
+  if (!isAddress(value)) return "has an invalid EIP-55 checksum (corrupted or mistyped?)";
+  return null;
+}
+
+/** Boundary validation: returns a failing check, or null when the request is well-formed. */
+function validateRequest(req: PaymentRequest): PolicyCheck | null {
+  const bad = (id: string, message: string): PolicyCheck => ({
+    id,
+    passed: false,
+    severity: "critical",
+    message,
+  });
+  if (req.amount <= 0n) {
+    return bad("invalid-amount", `payment amount must be positive (got ${req.amount})`);
+  }
+  // Solana addresses are base58, not hex — only apply the EVM check on EVM chains.
+  if (req.chain.startsWith("eip155:")) {
+    for (const [field, value] of [
+      ["recipient", req.recipient],
+      ["token", req.token],
+    ] as const) {
+      const problem = addressProblem(value);
+      if (problem) return bad(`invalid-${field}`, `${field} ${problem} (got ${value})`);
+    }
+  }
+  if (!/^[a-z0-9-]{3,8}:[a-zA-Z0-9._-]{1,32}$/.test(req.chain)) {
+    return bad("invalid-chain", `chain is not a valid CAIP-2 id (got ${req.chain})`);
+  }
+  return null;
 }
 
 /**
@@ -482,15 +602,24 @@ export {
   verifyWebhook,
   createWebhookEscalation,
   SIGNATURE_HEADER,
+  TIMESTAMP_HEADER,
+  DEFAULT_SIGNATURE_TOLERANCE_SECONDS,
 } from "./escalation/webhook.js";
-export type { WebhookEscalationOptions, EscalationEvent } from "./escalation/webhook.js";
+export type {
+  WebhookEscalationOptions,
+  EscalationEvent,
+  EscalationResponseBody,
+  VerifyWebhookOptions,
+} from "./escalation/webhook.js";
 export { AuditLogger, hashEntry } from "./audit/logger.js";
-export type { AnchorConfig, FlushResult, EntryProof } from "./audit/logger.js";
+export type { AnchorConfig, FlushResult, EntryProof, ReconcileResult } from "./audit/logger.js";
 export { SqliteAuditStore } from "./audit/store.js";
 export type { AuditStore, StoredEntry } from "./audit/store.js";
 export { PostgresAuditStore } from "./audit/postgres-store.js";
-export { MerkleAuditBatch, entryToLeaf } from "./audit/merkle.js";
-export { AuditAnchorClient, AUDIT_ANCHOR_ABI } from "./audit/anchor.js";
+export { MerkleAuditBatch, entryToLeaf, LEAF_TYPES } from "./audit/merkle.js";
+export type { LeafContext, LeafTuple } from "./audit/merkle.js";
+export { AuditAnchorClient, AUDIT_ANCHOR_ABI, ZERO_ROOT } from "./audit/anchor.js";
+export type { AnchorClientConfig, CommitResult, LeafFields, OnChainBatch } from "./audit/anchor.js";
 export {
   signEIP3009Authorization,
   inspectAuthorization,
@@ -503,6 +632,7 @@ export {
   permit2ApprovalNeeded,
   buildPermit2Approval,
 } from "./x402/permit2.js";
+export { assertAuthorizationMatches, AuthorizationMismatchError } from "./x402/inspect.js";
 export { FailoverFacilitatorClient } from "./x402/facilitator.js";
 export { registerSvmScheme } from "./x402/svm.js";
 export type { ClientSvmSigner } from "./x402/svm.js";

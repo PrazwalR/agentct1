@@ -14,9 +14,18 @@ export interface Features {
   vector: number[];
 }
 
-/** Extract scoring features for a payment relative to the agent's baseline. */
-export function extractFeatures(req: PaymentRequest, baseline: EWMABaseline): Features {
-  const now = Date.now();
+/**
+ * Extract scoring features for a payment relative to the agent's baseline.
+ *
+ * `now` is injectable so historical entries can be replayed at their real
+ * timestamps when rehydrating from the audit log — replaying with Date.now()
+ * would collapse every interval to ~0 and poison the frequency baseline.
+ */
+export function extractFeatures(
+  req: PaymentRequest,
+  baseline: EWMABaseline,
+  now = Date.now(),
+): Features {
   const last = baseline.lastTimestamp();
   const secondsSinceLast = last !== undefined ? (now - last) / 1000 : 0;
   const hourOfDay = new Date(now).getUTCHours();
