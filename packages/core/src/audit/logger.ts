@@ -100,6 +100,9 @@ function makeStore(store: string): AuditStore {
 export class AuditLogger {
   private readonly store: AuditStore;
   private readonly anchorClient?: AuditAnchorClient;
+  private timer?: ReturnType<typeof setInterval>;
+  /** A flush can block for minutes awaiting finality; never let two overlap. */
+  private anchoring = false;
 
   constructor(store: string | AuditStore = "sqlite", anchor?: AnchorConfig) {
     this.store = typeof store === "string" ? makeStore(store) : store;
@@ -242,7 +245,49 @@ export class AuditLogger {
     return out;
   }
 
-  close(): Promise<void> {
-    return this.store.close();
+  /**
+   * Anchor on a timer.
+   *
+   * `flush()` was manual-only, so a deployment that set `intervalMs` got no
+   * anchoring at all — the field was declared and read by nothing. Each tick
+   * reconciles first (releasing batches a reorg dropped) and then flushes, so a
+   * dropped commit is retried rather than stranded.
+   *
+   * Errors are logged, never thrown: a scheduler that dies on one bad RPC response
+   * stops anchoring forever, which is worse than a noisy log.
+   */
+  startAnchorScheduler(intervalMs: number): void {
+    if (!this.anchorClient || this.timer) return;
+    this.timer = setInterval(() => void this.anchorTick(), intervalMs);
+    // Never hold the process open just to anchor.
+    if (typeof this.timer.unref === "function") this.timer.unref();
+  }
+
+  stopAnchorScheduler(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  /** One reconcile-then-flush cycle. Exposed so an operator can trigger it manually. */
+  async anchorTick(): Promise<FlushResult | undefined> {
+    if (this.anchoring) return undefined; // a previous tick is still awaiting finality
+    this.anchoring = true;
+    try {
+      await this.reconcile();
+      return await this.flush();
+    } catch (err) {
+      console.warn(
+        `agentctl: scheduled anchor failed, will retry next interval — ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return undefined;
+    } finally {
+      this.anchoring = false;
+    }
+  }
+
+  async close(): Promise<void> {
+    this.stopAnchorScheduler();
+    await this.store.close();
   }
 }

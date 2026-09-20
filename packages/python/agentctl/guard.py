@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
-from ._bridge import evaluate_via_bridge
+from ._bridge import evaluate_via_bridge, evaluate_via_bridge_async
+
+
+class PaymentDecisionError(RuntimeError):
+    """The guard could not reach a decision, so the payment is refused."""
 
 
 @dataclass
@@ -54,8 +58,8 @@ class AgentGuard:
         self.policy = policy
         self.agent_id = agent_id
 
-    def evaluate(self, req: PaymentRequest) -> PolicyDecision:
-        request = {
+    def _request(self, req: PaymentRequest) -> dict:
+        return {
             "intent": req.intent,
             "amount": str(req.amount),
             "token": req.token,
@@ -64,11 +68,20 @@ class AgentGuard:
             "agentId": req.agent_id or self.agent_id,
             "resourceUrl": req.resource_url,
         }
-        out = evaluate_via_bridge(self.policy, request)
-        checks = [PolicyCheck(**c) for c in out.get("checks", [])]
+
+    @staticmethod
+    def _decision(out: dict) -> PolicyDecision:
         return PolicyDecision(
             verdict=out["verdict"],
             risk_score=out["riskScore"],
             reason=out["reason"],
-            checks=checks,
+            checks=[PolicyCheck(**c) for c in out.get("checks", [])],
         )
+
+    def evaluate(self, req: PaymentRequest) -> PolicyDecision:
+        """Evaluate one payment. Blocking — use `aevaluate` inside an async agent."""
+        return self._decision(evaluate_via_bridge(self.policy, self._request(req)))
+
+    async def aevaluate(self, req: PaymentRequest) -> PolicyDecision:
+        """Async evaluate, for async agent frameworks (LangChain, CrewAI, AutoGen)."""
+        return self._decision(await evaluate_via_bridge_async(self.policy, self._request(req)))

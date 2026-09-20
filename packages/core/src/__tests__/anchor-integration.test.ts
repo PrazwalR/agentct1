@@ -364,6 +364,51 @@ describe.skipIf(!enabled)("AuditAnchorClient against a live chain", () => {
     await log.close();
   }, 30_000);
 
+  it("anchors unattended on an interval, and stops when told to", async () => {
+    const { AuditLogger } = await import("../audit/logger.js");
+    const log = new AuditLogger(":memory:", {
+      chain: CHAIN,
+      contractAddress: contract,
+      committerKey: KEY,
+      rpcUrl: RPC,
+      confirmationTag: "latest",
+    });
+    const e = mkEntry(70);
+    await log.record(e.request, e.decision, { success: true });
+
+    log.startAnchorScheduler(120);
+    // Wait for a tick to land rather than assuming a fixed delay.
+    const deadline = Date.now() + 15_000;
+    while ((await log.list())[0] && Date.now() < deadline) {
+      const stored = await log.getById((await log.list())[0]!.id);
+      if (stored?.batchIndex !== null && stored?.batchIndex !== undefined) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const stored = await log.getById((await log.list())[0]!.id);
+    expect(stored?.batchIndex).not.toBeNull();
+
+    log.stopAnchorScheduler();
+    await log.close();
+  }, 30_000);
+
+  it("a scheduled tick never overlaps itself and never throws", async () => {
+    const { AuditLogger } = await import("../audit/logger.js");
+    const log = new AuditLogger(":memory:", {
+      chain: CHAIN,
+      contractAddress: contract,
+      // No committer key: every tick must fail softly rather than crash the timer.
+      rpcUrl: RPC,
+      confirmationTag: "latest",
+    });
+    const e = mkEntry(71);
+    await log.record(e.request, e.decision, { success: true });
+
+    // Without an anchor client this is a no-op; with a broken one it must not throw.
+    await expect(log.anchorTick()).resolves.toBeUndefined();
+    await expect(Promise.all([log.anchorTick(), log.anchorTick()])).resolves.toHaveLength(2);
+    await log.close();
+  }, 20_000);
+
   it("exposes BatchCommitted in the ABI so the index can be parsed at all", () => {
     const ev = AUDIT_ANCHOR_ABI.find((x) => x.type === "event" && x.name === "BatchCommitted");
     expect(ev).toBeDefined();

@@ -45,10 +45,19 @@ baselines and the circuit breaker are rebuilt from the audit log on startup, so 
 cap like "max $20/day" survives a restart), and signed-authorization verification (what
 the wallet actually signed is checked against what the policy approved, before settle).
 
-**Not yet built**: framework-specific packages (`@agentctl/langchain` / `openai` /
-`vercel` — a framework-agnostic `wrapPaymentTool` covers the TS side today), periodic
-auto-anchoring (`anchorAudit()` is manual), `execute()` on Solana (Solana works through
-`guardedFetch`), and TypeScript wiring for the Rust sidecar.
+Anchoring runs unattended when `anchor.intervalMs` and a committer key are both set:
+each tick reconciles (releasing batches a reorg dropped) then flushes. `guard.anchorNow()`
+forces a cycle; `guard.stopAnchoring()` halts it.
+
+**Not yet built**: framework-specific TS packages (`@agentctl/langchain` / `openai` /
+`vercel` — the framework-agnostic `wrapPaymentTool` covers TS, and the Python bindings
+ship a proper async LangChain middleware), `execute()` on Solana (Solana works through
+`guardedFetch`), TypeScript wiring for the Rust sidecar, and a structural
+resource-domain ↔ recipient check for payments below the LLM intent threshold.
+
+**Never run for real yet**: `AuditAnchor` has not been deployed to a public chain and no
+x402 payment has settled against a live facilitator. Everything is verified in tests,
+including a live-chain suite against anvil — but a Base Sepolia run is still outstanding.
 
 ## Layout
 

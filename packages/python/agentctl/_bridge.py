@@ -6,6 +6,7 @@ behavioral, and intent logic in Python. Requires Node.js and the built CLI.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -39,3 +40,25 @@ def evaluate_via_bridge(policy: dict, request: dict) -> dict:
     if proc.returncode != 0:
         raise RuntimeError(f"agentctl eval failed: {proc.stderr.strip()}")
     return json.loads(proc.stdout.strip())
+
+
+async def evaluate_via_bridge_async(policy: dict, request: dict) -> dict:
+    """Async variant.
+
+    The bridge shells out to Node, which takes tens of milliseconds. Doing that with
+    blocking `subprocess.run` inside an async agent stalls the whole event loop, so
+    the async path gets a real async subprocess rather than a sync call in a wrapper.
+    """
+    payload = json.dumps({"policy": policy, "request": request})
+    proc = await asyncio.create_subprocess_exec(
+        _node_bin(),
+        _cli_path(),
+        "eval",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate(payload.encode())
+    if proc.returncode != 0:
+        raise RuntimeError(f"agentctl eval failed: {stderr.decode().strip()}")
+    return json.loads(stdout.decode().strip())

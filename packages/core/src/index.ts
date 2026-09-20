@@ -157,6 +157,11 @@ export class AgentGuard {
     if (config.hydrate !== false) {
       await guard.hydrate(config.hydrateLookbackMs ?? DEFAULT_HYDRATE_LOOKBACK_MS);
     }
+    // Setting both an interval and a committer key is an explicit request to anchor
+    // unattended, so honour it rather than leaving intervalMs inert.
+    if (config.anchor?.intervalMs && config.anchor.committerKey) {
+      guard.auditLog.startAnchorScheduler(config.anchor.intervalMs);
+    }
     return guard;
   }
 
@@ -208,6 +213,16 @@ export class AgentGuard {
    */
   async reconcileAudit() {
     return this.audit.reconcile();
+  }
+
+  /** Stop unattended anchoring (started automatically when anchor.intervalMs is set). */
+  stopAnchoring(): void {
+    this.audit.stopAnchorScheduler();
+  }
+
+  /** Run one reconcile-then-flush cycle now, without waiting for the next tick. */
+  async anchorNow() {
+    return this.audit.anchorTick();
   }
 
   /** The agent's circuit breaker, if configured (state / counts / manual reset). */

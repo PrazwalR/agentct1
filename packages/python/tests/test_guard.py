@@ -57,3 +57,115 @@ def test_middleware_blocks_payment_tool():
     )
     assert "blocked" in out.lower()
     assert called["v"] is False  # the real tool never ran
+
+
+# ── async middleware (LangChain's protocol is async) ────────────────────────
+
+import asyncio
+
+import pytest
+
+from agentctl import PaymentDecisionError
+
+
+def test_async_evaluate_matches_sync():
+    guard = AgentGuard(POLICY)
+    req = PaymentRequest(intent="weather data", amount=500_000, token=USDC, recipient=KNOWN)
+    assert asyncio.run(guard.aevaluate(req)).verdict == guard.evaluate(req).verdict
+
+
+def test_async_middleware_blocks_and_never_runs_the_tool():
+    guard = AgentGuard(POLICY)
+    mw = AgentctlPaymentMiddleware(guard, ["pay_for_api"])
+    called = {"v": False}
+
+    async def next_handler(name, args):
+        called["v"] = True
+        return "tool ran"
+
+    out = asyncio.run(
+        mw.awrap_tool_call(
+            "pay_for_api",
+            {"reason": "x", "amount": 15_000_000, "token": USDC, "recipient": ATTACKER},
+            next_handler,
+        )
+    )
+    assert "blocked" in out.lower()
+    assert called["v"] is False
+
+
+def test_async_middleware_lets_an_allowed_payment_through():
+    guard = AgentGuard(POLICY)
+    mw = AgentctlPaymentMiddleware(guard, ["pay_for_api"])
+
+    async def next_handler(name, args):
+        return "tool ran"
+
+    out = asyncio.run(
+        mw.awrap_tool_call(
+            "pay_for_api",
+            {"reason": "weather", "amount": 500_000, "token": USDC, "recipient": KNOWN},
+            next_handler,
+        )
+    )
+    assert out == "tool ran"
+
+
+def test_async_middleware_refuses_an_escalation_without_an_approver():
+    # An agent must never be able to self-approve: no handler means refused.
+    guard = AgentGuard(POLICY)
+    mw = AgentctlPaymentMiddleware(guard, ["pay_for_api"])
+
+    async def next_handler(name, args):
+        return "tool ran"
+
+    out = asyncio.run(
+        mw.awrap_tool_call(
+            "pay_for_api",
+            {"reason": "bulk compute", "amount": 15_000_000, "token": USDC, "recipient": KNOWN},
+            next_handler,
+        )
+    )
+    assert "approval" in out.lower()
+
+
+def test_async_middleware_honours_an_async_approver():
+    guard = AgentGuard(POLICY)
+
+    async def approve(req, decision):
+        return True
+
+    mw = AgentctlPaymentMiddleware(guard, ["pay_for_api"], on_escalate=approve)
+
+    async def next_handler(name, args):
+        return "tool ran"
+
+    out = asyncio.run(
+        mw.awrap_tool_call(
+            "pay_for_api",
+            {"reason": "bulk compute", "amount": 15_000_000, "token": USDC, "recipient": KNOWN},
+            next_handler,
+        )
+    )
+    assert out == "tool ran"
+
+
+def test_non_payment_tools_pass_straight_through():
+    guard = AgentGuard(POLICY)
+    mw = AgentctlPaymentMiddleware(guard, ["pay_for_api"])
+
+    async def next_handler(name, args):
+        return "search ran"
+
+    assert asyncio.run(mw.awrap_tool_call("search", {"q": "x"}, next_handler)) == "search ran"
+
+
+def test_a_payment_tool_missing_fields_is_refused_not_guessed():
+    guard = AgentGuard(POLICY)
+    mw = AgentctlPaymentMiddleware(guard, ["pay_for_api"])
+
+    async def next_handler(name, args):
+        return "tool ran"
+
+    with pytest.raises(PaymentDecisionError, match="recipient"):
+        asyncio.run(mw.awrap_tool_call("pay_for_api", {"amount": 1, "token": USDC}, next_handler))
