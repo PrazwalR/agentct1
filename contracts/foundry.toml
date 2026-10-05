@@ -24,3 +24,10 @@ fail_on_revert = true
 
 [rpc_endpoints]
 base_sepolia = "${RPC_BASE_SEPOLIA}"
+base = "${RPC_BASE}"
+
+[etherscan]
+# One Etherscan V2 multichain key covers Base; `forge verify-contract` and
+# `forge script --verify` both read this.
+base_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 84532 }
+base = { key = "${ETHERSCAN_API_KEY}", chain = 8453 }

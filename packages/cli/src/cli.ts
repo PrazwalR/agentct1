@@ -587,11 +587,21 @@ async function verifyEntries(
         if (!withinTime) {
           problems.push(`${e.id.slice(0, 8)} claims a timestamp after batch#${batchIndex}`);
         }
-        if (ok && withinTime) verified++;
+        // A stored hash that disagrees with the row's contents means the row was
+        // edited after it was written — report that specifically, because it is a
+        // different failure from a bad index or a reorg.
+        if (!proof.storedHashMatches) {
+          problems.push(
+            `${e.id.slice(0, 8)} was EDITED after it was recorded — its contents no longer ` +
+              `match the hash committed on-chain`,
+          );
+        }
+        const good = ok && withinTime && proof.storedHashMatches;
+        if (good) verified++;
         else failed++;
         console.log(
           `  ${e.id.slice(0, 8)}  batch#${batchIndex}  ${
-            ok && withinTime ? "✓ verified on-chain" : "✗ MISMATCH"
+            good ? "✓ verified on-chain" : proof.storedHashMatches ? "✗ MISMATCH" : "✗ EDITED"
           }`,
         );
       }

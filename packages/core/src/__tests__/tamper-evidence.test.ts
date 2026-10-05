@@ -129,3 +129,88 @@ describe("MerkleAuditBatch", () => {
     expect(build(`0x${"11".repeat(32)}`)).not.toBe(build(`0x${"22".repeat(32)}`));
   });
 });
+
+// ── the verifier must re-derive the hash, not trust the stored column ───────
+
+describe("proofsForBatch re-derives entryHash from the row", () => {
+  /**
+   * The bug a live run surfaced: hashEntry() covered settlement, but entry_hash was
+   * written once at record time and the leaf was built from that stored column. An
+   * attacker with only database write access could rewrite amount, intent, token,
+   * risk score, checks or settlement and the proof still matched — a $0.10 payment
+   * edited to $99.00 verified as "verified on-chain". Putting a field inside
+   * hashEntry is useless unless the hash is recomputed at verification time.
+   */
+  const CTX2: LeafContext = CTX;
+
+  async function storeWith(entries: AuditEntry[]) {
+    const { SqliteAuditStore } = await import("../audit/store.js");
+    const { AuditLogger } = await import("../audit/logger.js");
+    const store = new SqliteAuditStore(":memory:");
+    for (const e of entries) await store.insert(e);
+    await store.markBatched(
+      entries.map((e) => e.id),
+      0,
+      "0xdeadbeef",
+    );
+    return { log: new AuditLogger(store), store };
+  }
+
+  it("flags a row whose stored hash disagrees with its contents", async () => {
+    const honest = entry({ id: "ok" });
+    // Same shape, but the hash column was not updated after the amount changed.
+    const edited: AuditEntry = {
+      ...entry({ id: "edited" }),
+      request: { ...req, amount: parseUnits("99", 6) },
+      // entryHash deliberately left as the pre-edit value
+      entryHash: hashEntry(req, decision, settled),
+    };
+
+    const { log } = await storeWith([honest, edited]);
+    const proofs = await log.proofsForBatch(0, CTX2);
+
+    expect(proofs.get("ok")!.storedHashMatches).toBe(true);
+    expect(proofs.get("edited")!.storedHashMatches).toBe(false);
+    await log.close();
+  });
+
+  it("detects an edited settlement, which the stored column would have hidden", async () => {
+    const edited: AuditEntry = {
+      ...entry({ id: "s" }),
+      settlement: { ...settled, txHash: `0x${"11".repeat(32)}` },
+      entryHash: hashEntry(req, decision, settled), // hash of the ORIGINAL settlement
+    };
+    const { log } = await storeWith([edited]);
+    const proofs = await log.proofsForBatch(0, CTX2);
+    expect(proofs.get("s")!.storedHashMatches).toBe(false);
+    await log.close();
+  });
+
+  it("changes the leaf, so the proof cannot match the committed root either", async () => {
+    const good = entry({ id: "a" });
+    const { log: l1 } = await storeWith([good]);
+    const before = (await l1.proofsForBatch(0, CTX2)).get("a")!;
+    await l1.close();
+
+    const tampered: AuditEntry = {
+      ...good,
+      request: { ...req, amount: parseUnits("99", 6) },
+      entryHash: good.entryHash,
+    };
+    const { log: l2 } = await storeWith([tampered]);
+    const after = (await l2.proofsForBatch(0, CTX2)).get("a")!;
+    await l2.close();
+
+    // A single-entry batch has root == leaf, so the root itself moves.
+    expect(after.leaf).not.toBe(before.leaf);
+    expect(after.localRoot).not.toBe(before.localRoot);
+  });
+
+  it("leaves an untouched log fully verifiable", async () => {
+    const entries = [0, 1, 2].map((i) => entry({ id: `e${i}`, timestamp: 1700 + i }));
+    const { log } = await storeWith(entries);
+    const proofs = await log.proofsForBatch(0, CTX2);
+    expect([...proofs.values()].every((p) => p.storedHashMatches)).toBe(true);
+    await log.close();
+  });
+});

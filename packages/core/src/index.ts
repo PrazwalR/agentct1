@@ -626,7 +626,7 @@ export type {
   EscalationResponseBody,
   VerifyWebhookOptions,
 } from "./escalation/webhook.js";
-export { AuditLogger, hashEntry } from "./audit/logger.js";
+export { AuditLogger, hashEntry, recomputeEntryHash } from "./audit/logger.js";
 export type { AnchorConfig, FlushResult, EntryProof, ReconcileResult } from "./audit/logger.js";
 export { SqliteAuditStore } from "./audit/store.js";
 export type { AuditStore, StoredEntry } from "./audit/store.js";

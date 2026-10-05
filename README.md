@@ -55,9 +55,13 @@ ship a proper async LangChain middleware), `execute()` on Solana (Solana works t
 `guardedFetch`), TypeScript wiring for the Rust sidecar, and a structural
 resource-domain ↔ recipient check for payments below the LLM intent threshold.
 
-**Never run for real yet**: `AuditAnchor` has not been deployed to a public chain and no
-x402 payment has settled against a live facilitator. Everything is verified in tests,
-including a live-chain suite against anvil — but a Base Sepolia run is still outstanding.
+**Live on Base Sepolia.** `AuditAnchor` is deployed and verified at
+[`0xbF41b6eb9349999c6687A360dc26C9227F962047`](https://sepolia.basescan.org/address/0xbf41b6eb9349999c6687a360dc26c9227f962047).
+A real x402 payment has settled through the `https://x402.org/facilitator` testnet
+facilitator ($0.10 USDC, tx
+[`0xdc9aa815…`](https://sepolia.basescan.org/tx/0xdc9aa8157fbf70f95dcdcd0bacea56cb3c17b02a5481ac7dd05366e319447561)),
+the allow/escalate/block trail was anchored as batch #0, and all three entries verify
+on-chain from a third party holding no private key.
 
 ## Layout
 

@@ -60,6 +60,25 @@ export function hashEntry(
   return keccak256(toHex(canonical));
 }
 
+/**
+ * Re-derive an entry's hash from its current contents.
+ *
+ * The stored `entry_hash` column must never be trusted when building or checking a
+ * proof. It is written once at record time, so an attacker with database write
+ * access could edit any field the leaf does not carry directly — amount, intent,
+ * token, risk score, checks, settlement — and the stored hash, and therefore the
+ * proof, would still match. Putting settlement inside hashEntry() is useless on its
+ * own; the hash has to be recomputed from the row at verification time.
+ */
+export function recomputeEntryHash(e: AuditEntry): Hex {
+  return hashEntry(e.request, e.decision, e.settlement);
+}
+
+/** An entry with its hash re-derived, so the leaf reflects the row's real contents. */
+function canonicalize(e: AuditEntry): AuditEntry {
+  return { ...e, entryHash: recomputeEntryHash(e) };
+}
+
 export interface FlushResult {
   batchIndex: number;
   root: Hex;
@@ -74,6 +93,12 @@ export interface EntryProof {
   localRoot: Hex;
   /** The fields the contract re-hashes into the leaf; it accepts no pre-hashed leaf. */
   fields: LeafFields;
+  /**
+   * False when the row's stored hash disagrees with its contents — i.e. the row was
+   * edited after it was written. The proof fails too, but this distinguishes
+   * "someone edited the log" from "the wrong batch index" or "a reorg".
+   */
+  storedHashMatches: boolean;
 }
 
 export interface ReconcileResult {
@@ -161,7 +186,9 @@ export class AuditLogger {
 
     const operator = this.anchorClient.operatorAddress();
     const batch = new MerkleAuditBatch(this.anchorClient.leafContext(operator));
-    for (const entry of rows) batch.addEntry(entry);
+    // Canonicalize so the committed root is a function of the rows' contents, not
+    // of a hash column that could already have been edited before the first flush.
+    for (const entry of rows) batch.addEntry(canonicalize(entry));
     const root = batch.root();
 
     // Name the head we are extending. The contract rejects anything else, so an
@@ -222,12 +249,13 @@ export class AuditLogger {
    */
   async proofsForBatch(batchIndex: number, ctx: LeafContext): Promise<Map<string, EntryProof>> {
     const rows = await this.store.entriesInBatch(batchIndex);
+    const canonical = rows.map(canonicalize);
     const batch = new MerkleAuditBatch(ctx);
-    for (const entry of rows) batch.addEntry(entry);
+    for (const entry of canonical) batch.addEntry(entry);
     const localRoot = batch.root();
 
     const out = new Map<string, EntryProof>();
-    rows.forEach((entry, i) => {
+    canonical.forEach((entry, i) => {
       out.set(entry.id, {
         batchIndex,
         leaf: batch.leafAt(i),
@@ -238,8 +266,10 @@ export class AuditLogger {
           timestamp: BigInt(entry.timestamp),
           recipient: entry.request.recipient,
           verdict: verdictToNum(entry.decision.verdict),
+          // Derived, never the stored column.
           entryHash: entry.entryHash,
         },
+        storedHashMatches: entry.entryHash === rows[i]!.entryHash,
       });
     });
     return out;
