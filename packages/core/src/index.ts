@@ -21,6 +21,7 @@ import { PolicyEvaluator } from "./policy/evaluator.js";
 import { compilePolicy } from "./policy/compiler.js";
 import { BehavioralScorer, type BehavioralOptions } from "./behavioral/isolation.js";
 import { IntentReconciler } from "./intent/reconcile.js";
+import { ResourceRegistry } from "./intent/registry.js";
 import { AuditLogger, type AnchorConfig } from "./audit/logger.js";
 import type { AuditStore } from "./audit/store.js";
 import {
@@ -110,6 +111,7 @@ export class AgentGuard {
   private readonly evaluator: PolicyEvaluator;
   private readonly behavioral: BehavioralScorer;
   private readonly intent: IntentReconciler;
+  private readonly resources = new ResourceRegistry();
   private readonly audit: AuditLogger;
   private readonly facilitatorUrl: string;
   private readonly facilitatorFallbackUrls?: string[];
@@ -184,6 +186,7 @@ export class AgentGuard {
       const settled = entries.filter((e) => e.settlement?.success);
       this.evaluator.hydrate(settled);
       await this.behavioral.hydrate(settled);
+      this.resources.hydrate(settled); // resource → payee bindings
       this.breaker?.hydrate(entries);
     } catch (err) {
       console.warn(
@@ -235,6 +238,11 @@ export class AgentGuard {
     this.breaker?.reset();
   }
 
+  /** Known resource → payee bindings (inspection / operator UI). */
+  get resourceRegistry(): ResourceRegistry {
+    return this.resources;
+  }
+
   /** The pending-approval queue, if configured (list / resolve escalated payments). */
   get approvalQueue(): ApprovalQueue | undefined {
     return this._approvalQueue;
@@ -283,8 +291,11 @@ export class AgentGuard {
 
       const { checks: policyChecks, escalate: policyEscalate } = await this.evaluator.evaluate(req);
       const { score, anomalyChecks } = await this.behavioral.score(req);
+      // Deterministic and free, so unlike the LLM check it runs at every amount —
+      // which is what gives sub-threshold micropayments any intent coverage at all.
+      const bindingCheck = this.resources.check(req);
       const intentCheck = await this.intent.check(req);
-      const checks: PolicyCheck[] = [...policyChecks, ...anomalyChecks, intentCheck];
+      const checks: PolicyCheck[] = [...policyChecks, ...anomalyChecks, bindingCheck, intentCheck];
 
       const verdict = aggregateVerdict(checks, score, {
         anomalyThreshold: this.evaluator.anomalyThreshold,
@@ -340,6 +351,7 @@ export class AgentGuard {
       if (settlement.success) {
         await this.behavioral.observe(req);
         this.evaluator.observe(req);
+        this.resources.bind(req.resourceUrl, req.recipient);
       }
       await this.audit.record(req, decision, settlement);
       span.setAttribute("agentctl.executed", settlement.success);
@@ -459,6 +471,7 @@ export class AgentGuard {
         if (settlement?.success) {
           await this.behavioral.observe(pending.req);
           this.evaluator.observe(pending.req);
+          this.resources.bind(pending.req.resourceUrl, pending.req.recipient);
         }
         // Defensive: an aborted payment is already recorded by the before-hook.
         if (!pending.recorded) {
@@ -596,6 +609,7 @@ export type { PrivyAdapterConfig } from "./adapters/privy.js";
 export { compilePolicy, compilePolicyObject } from "./policy/compiler.js";
 export { callLLM, resolveLLMConfig } from "./llm/client.js";
 export type { LLMConfig, LLMProvider, LLMCallParams } from "./llm/client.js";
+export { ResourceRegistry } from "./intent/registry.js";
 export { PolicyEvaluator } from "./policy/evaluator.js";
 export { BehavioralScorer } from "./behavioral/isolation.js";
 export type { BehavioralOptions, BehavioralResult } from "./behavioral/isolation.js";

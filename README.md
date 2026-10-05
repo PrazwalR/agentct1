@@ -52,8 +52,7 @@ forces a cycle; `guard.stopAnchoring()` halts it.
 **Not yet built**: framework-specific TS packages (`@agentctl/langchain` / `openai` /
 `vercel` — the framework-agnostic `wrapPaymentTool` covers TS, and the Python bindings
 ship a proper async LangChain middleware), `execute()` on Solana (Solana works through
-`guardedFetch`), TypeScript wiring for the Rust sidecar, and a structural
-resource-domain ↔ recipient check for payments below the LLM intent threshold.
+`guardedFetch`), and TypeScript wiring for the Rust sidecar.
 
 **Live on Base Sepolia.** `AuditAnchor` is deployed and verified at
 [`0xbF41b6eb9349999c6687A360dc26C9227F962047`](https://sepolia.basescan.org/address/0xbf41b6eb9349999c6687a360dc26c9227f962047).
@@ -204,9 +203,12 @@ forge script script/Deploy.s.sol --root contracts --rpc-url base_sepolia --broad
    protocol-agnostic; the x402 adapter is the coupling point.
 6. **Use _with_ provider-level controls, not instead of them.** Defense in depth: provider
    TEE caps are the hard floor, agentctl is the intelligent layer above.
-7. **Intent checking is amount-gated, so most micropayments skip it.** The LLM check only
-   runs above a threshold (default $1). Sub-threshold x402 traffic — which is most of it —
-   is covered by the policy and behavioral layers only.
+7. **Intent checking has two halves with different reach.** A deterministic
+   resource-binding check runs at _every_ amount: once a resource host has been paid, a
+   later payment naming a different payee for that host is blocked. The _semantic_ LLM
+   check only runs above a threshold (default $1), so sub-threshold traffic relies on the
+   binding check plus the policy and behavioral layers — and the binding check cannot help
+   on a first-ever payment to a host.
 8. **Pending approvals do not survive a restart.** The approval queue holds live promises;
    a process that dies mid-escalation loses them (the request awaiting it is gone too). The
    escalation is still recorded to the audit log as denied.

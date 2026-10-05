@@ -464,6 +464,11 @@ function renderDecision(req: PaymentRequest, decision: PolicyDecision): void {
   if (decision.verdict === "block") process.exitCode = 2;
 }
 
+/** Pick the singular or plural form for a count. */
+function plural(n: number, one: string, many: string): string {
+  return n === 1 ? one : many;
+}
+
 /**
  * Select the RPC for a chain.
  *
@@ -568,9 +573,13 @@ async function verifyEntries(
       }
       // Inclusion proofs cannot reveal a removed entry; only the count can.
       if (proofs.size !== onChain.entryCount) {
+        const missing = onChain.entryCount - proofs.size;
         problems.push(
-          `batch#${batchIndex} holds ${proofs.size} entries locally but ${onChain.entryCount} were committed ` +
-            `— ${onChain.entryCount - proofs.size} entries are missing from the local log`,
+          `batch#${batchIndex} holds ${proofs.size} ${plural(proofs.size, "entry", "entries")} ` +
+            `locally but ${onChain.entryCount} ${onChain.entryCount === 1 ? "was" : "were"} ` +
+            `committed — ${Math.abs(missing)} ` +
+            `${plural(Math.abs(missing), "entry is", "entries are")} ` +
+            `${missing > 0 ? "missing from the local log" : "present locally but never committed"}`,
         );
       }
 
