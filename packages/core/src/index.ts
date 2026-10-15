@@ -6,6 +6,7 @@ import { HTTPFacilitatorClient } from "@x402/core/http";
 import { FailoverFacilitatorClient } from "./x402/facilitator.js";
 
 import type {
+  AuditEntry,
   IWalletAdapter,
   PaymentRequest,
   Policy,
@@ -22,7 +23,7 @@ import { compilePolicy } from "./policy/compiler.js";
 import { BehavioralScorer, type BehavioralOptions } from "./behavioral/isolation.js";
 import { IntentReconciler } from "./intent/reconcile.js";
 import { ResourceRegistry } from "./intent/registry.js";
-import { AuditLogger, type AnchorConfig } from "./audit/logger.js";
+import { AuditLogger, recomputeEntryHash, type AnchorConfig } from "./audit/logger.js";
 import type { AuditStore } from "./audit/store.js";
 import {
   type GuardedFetchOptions,
@@ -89,6 +90,17 @@ export interface GuardConfig {
   hydrateLookbackMs?: number;
 }
 
+/** What rehydration found, including any evidence the log was edited. */
+export interface HydrationReport {
+  /** Rows read from the audit store. */
+  entries: number;
+  /** Intact rows that record a successful settlement. */
+  settled: number;
+  /** Rows whose contents no longer match their recorded hash. */
+  tampered: number;
+  tamperedIds: string[];
+}
+
 /** Default rehydration horizon: enough history to train the forest, bounded. */
 const DEFAULT_HYDRATE_LOOKBACK_MS = 30 * 86_400_000;
 
@@ -112,6 +124,7 @@ export class AgentGuard {
   private readonly behavioral: BehavioralScorer;
   private readonly intent: IntentReconciler;
   private readonly resources = new ResourceRegistry();
+  private lastHydration?: HydrationReport;
   private readonly audit: AuditLogger;
   private readonly facilitatorUrl: string;
   private readonly facilitatorFallbackUrls?: string[];
@@ -179,21 +192,66 @@ export class AgentGuard {
    * Never fatal: a guard that cannot read history must still evaluate payments,
    * so a store failure degrades to a cold start rather than refusing to start.
    */
-  async hydrate(lookbackMs = DEFAULT_HYDRATE_LOOKBACK_MS): Promise<void> {
+  async hydrate(lookbackMs = DEFAULT_HYDRATE_LOOKBACK_MS): Promise<HydrationReport | undefined> {
     try {
       const entries = await this.audit.listSince(this.agentId, Date.now() - lookbackMs);
-      if (entries.length === 0) return;
-      const settled = entries.filter((e) => e.settlement?.success);
-      this.evaluator.hydrate(settled);
+      if (entries.length === 0) return { entries: 0, settled: 0, tampered: 0, tamperedIds: [] };
+
+      // Never take a stored row at face value. The spend window is rebuilt from rows
+      // that claim `settlement.success`, so an attacker with database write access and
+      // no keys could flip today's settlements to false and have the daily budget
+      // reset on the next restart — freeing the agent to spend the cap twice.
+      const intact: AuditEntry[] = [];
+      const tampered: AuditEntry[] = [];
+      for (const e of entries) {
+        (recomputeEntryHash(e) === e.entryHash ? intact : tampered).push(e);
+      }
+
+      const settled = intact.filter((e) => e.settlement?.success);
+
+      // Spend windows also count tampered rows, whatever they now claim. We cannot
+      // recover what such a row really said, so the only safe direction is to assume
+      // the money moved: a wrong cap that is too tight costs a declined payment, a
+      // wrong cap that is too loose costs funds.
+      this.evaluator.hydrate([...settled, ...tampered]);
+      // Baselines and payee bindings get intact rows only — an edited row must not be
+      // allowed to shape what "normal" looks like, or to bind a payee to a resource.
       await this.behavioral.hydrate(settled);
-      this.resources.hydrate(settled); // resource → payee bindings
-      this.breaker?.hydrate(entries);
+      this.resources.hydrate(settled);
+      this.breaker?.hydrate(intact);
+
+      const report: HydrationReport = {
+        entries: entries.length,
+        settled: settled.length,
+        tampered: tampered.length,
+        tamperedIds: tampered.map((e) => e.id),
+      };
+      this.lastHydration = report;
+
+      if (tampered.length > 0) {
+        console.warn(
+          `agentctl: ${tampered.length} audit ` +
+            `${tampered.length === 1 ? "entry does not match its" : "entries do not match their"} ` +
+            `recorded hash for ${this.agentId} — the log has been edited. ` +
+            `Counting them against spend caps and excluding them from baselines. ` +
+            `Ids: ${report.tamperedIds.slice(0, 5).join(", ")}` +
+            `${tampered.length > 5 ? `, +${tampered.length - 5} more` : ""}`,
+        );
+      }
+      return report;
     } catch (err) {
+      // A guard that cannot read history must still evaluate payments.
       console.warn(
         `agentctl: could not rehydrate state for ${this.agentId}, starting cold — ` +
           `${err instanceof Error ? err.message : String(err)}`,
       );
+      return undefined;
     }
+  }
+
+  /** What the last hydrate() found, including evidence the log was edited. */
+  get hydrationReport(): HydrationReport | undefined {
+    return this.lastHydration;
   }
 
   /** Audit log accessor (CLI / tests). */

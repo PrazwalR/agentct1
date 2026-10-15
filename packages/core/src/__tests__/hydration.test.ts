@@ -3,7 +3,7 @@ import { parseUnits, type Address } from "viem";
 import { generatePrivateKey } from "viem/accounts";
 import { createGuard } from "../index.js";
 import { ViemAdapter } from "../adapters/viem.js";
-import { AuditLogger } from "../audit/logger.js";
+import { AuditLogger, recomputeEntryHash } from "../audit/logger.js";
 import { SqliteAuditStore } from "../audit/store.js";
 import { PolicyEvaluator } from "../policy/evaluator.js";
 import { BehavioralScorer } from "../behavioral/isolation.js";
@@ -214,5 +214,85 @@ describe("AgentGuard hydration end-to-end", () => {
     } as unknown as SqliteAuditStore;
     const guard = await guardOver(broken, true);
     expect((await guard.evaluate(req("5"))).verdict).toBe("allow");
+  });
+});
+
+// ── hydration must not trust unverified rows ───────────────────────────────
+
+describe("hydration verifies row integrity before trusting it", () => {
+  /**
+   * Spend windows are rebuilt from rows claiming `settlement.success`. Before this,
+   * an attacker with database write access and no keys could flip today's
+   * settlements to false and the daily budget would reset on the next restart,
+   * letting the agent spend the cap a second time. Enforcement state has to be as
+   * tamper-evident as the audit trail it is derived from.
+   */
+  async function seedStore(): Promise<{ store: SqliteAuditStore; original: AuditEntry }> {
+    const store = new SqliteAuditStore(":memory:");
+    const log = new AuditLogger(store);
+    const original = await log.record(
+      req("18"),
+      { verdict: "allow", riskScore: 0, checks: [], reason: "ok" },
+      { success: true },
+    );
+    return { store, original };
+  }
+
+  async function guardOn(store: SqliteAuditStore) {
+    return createGuard({
+      wallet: new ViemAdapter({ privateKey: generatePrivateKey() }),
+      policy: dayCap,
+      auditStore: store,
+      hydrate: true,
+    });
+  }
+
+  it("reports a clean log as untampered", async () => {
+    const { store } = await seedStore();
+    const guard = await guardOn(store);
+    expect(guard.hydrationReport?.tampered).toBe(0);
+    expect(guard.hydrationReport?.settled).toBe(1);
+    await guard.auditLog.close();
+  });
+
+  it("still counts a row whose settled flag was flipped, so the budget cannot reset", async () => {
+    const { store, original } = await seedStore();
+    // The attack: claim it never settled, leaving entry_hash untouched.
+    await store.insert({
+      ...original,
+      id: "flipped",
+      settlement: { success: false },
+      entryHash: original.entryHash,
+    });
+
+    const guard = await guardOn(store);
+    expect(guard.hydrationReport?.tampered).toBeGreaterThan(0);
+    expect(guard.hydrationReport?.tamperedIds).toContain("flipped");
+
+    // 18 intact + 18 counted conservatively is already past the 20 cap.
+    expect((await guard.evaluate(req("5"))).verdict).toBe("block");
+    await guard.auditLog.close();
+  });
+
+  it("keeps a tampered row out of the baseline and the payee bindings", async () => {
+    const { store, original } = await seedStore();
+    await store.insert({
+      ...original,
+      id: "poison",
+      request: { ...original.request, amount: parseUnits("999999", 6) },
+      entryHash: original.entryHash,
+    });
+    const guard = await guardOn(store);
+    expect(guard.hydrationReport?.tamperedIds).toContain("poison");
+    // An edited row must not get to define what "normal" looks like.
+    expect(guard.resourceRegistry.size).toBe(0);
+    await guard.auditLog.close();
+  });
+
+  it("recomputeEntryHash detects an edit the stored column hides", async () => {
+    const { original } = await seedStore();
+    expect(recomputeEntryHash(original)).toBe(original.entryHash);
+    const edited = { ...original, settlement: { success: false } };
+    expect(recomputeEntryHash(edited)).not.toBe(edited.entryHash);
   });
 });
